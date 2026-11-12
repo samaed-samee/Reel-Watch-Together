@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; script-src 'self' https://unpkg.com https://www.youtube.com https://www.youtube-nocookie.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data: https: http:; connect-src 'self' https: wss: ws:; frame-src https://www.youtube.com https://www.youtube-nocookie.com; child-src https://www.youtube.com https://www.youtube-nocookie.com;">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#F4EFE4">
+<title>Reel · Watch Together</title>
+<script src="boot.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ===== SPLASH ===== -->
+  <div id="splash">
+    <div class="splash-inner">
+      <svg class="reel-doodle" viewBox="0 0 100 100" fill="none" stroke="#1B1815" stroke-width="3.2" stroke-linecap="round">
+        <circle cx="50" cy="50" r="34" stroke-dasharray="4 7"/>
+        <circle cx="50" cy="50" r="8" fill="#F0514B" stroke="#1B1815"/>
+        <circle cx="50" cy="24" r="7" fill="#FFFCF5"/>
+        <circle cx="76" cy="50" r="7" fill="#FFFCF5"/>
+        <circle cx="50" cy="76" r="7" fill="#FFFCF5"/>
+        <circle cx="24" cy="50" r="7" fill="#FFFCF5"/>
+      </svg>
+      <div class="splash-title">Reel</div>
+      <div class="splash-sub">watch together</div>
+    </div>
+  </div>
+
+  <!-- ===== HOME ===== -->
+  <section id="view-home" class="view">
+    <div class="home-top">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+        <div>
+          <div class="brand-name">Reel</div>
+          <div class="brand-tag">Watch together</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero">
+      <h1>Movie night,<br><em>just the two</em> of you.</h1>
+      <p>Share a code, hit play, and stay in sync. No sign-ups, nothing to install.</p>
+    </div>
+
+    <div class="home-actions">
+      <div class="name-card">
+        <div class="join-label">Your name</div>
+        <input id="name-input" type="text" autocomplete="nickname" autocapitalize="words"
+               spellcheck="false" placeholder="e.g. Alex" maxlength="20">
+      </div>
+
+      <button class="btn" id="btn-create">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Create a room
+      </button>
+
+      <div class="or-row">or join one</div>
+
+      <div class="join-card">
+        <div class="join-label">Room code</div>
+        <input id="code-input" inputmode="text" autocomplete="off" autocapitalize="characters"
+               spellcheck="false" placeholder="XXXX-XXXX-XXXX" maxlength="14">
+        <button class="btn ghost" id="btn-join">Join room</button>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature"><div class="fi">🔒</div><div class="ft">Private</div></div>
+      <div class="feature"><div class="fi">⚡</div><div class="ft">In sync</div></div>
+      <div class="feature"><div class="fi">💬</div><div class="ft">Chat</div></div>
+    </div>
+  </section>
+
+  <!-- ===== ROOM ===== -->
+  <section id="view-room" class="view hidden">
+    <header class="room-header">
+      <button class="icon-btn" id="btn-leave" aria-label="Leave">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="room-title">
+        <div class="code-chip" id="code-chip">
+          <span id="code-text">----</span>
+          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+        </div>
+        <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Waiting for partner…</span></div>
+      </div>
+      <button class="icon-btn" id="btn-menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/></svg>
+      </button>
+    </header>
+
+    <div class="stage">
+      <div class="video-wrap" id="video-wrap">
+        <video id="video" playsinline webkit-playsinline preload="metadata"></video>
+        <div class="yt-stage" id="yt-stage"></div>
+
+        <div class="empty-stage" id="empty-stage">
+          <div class="doodle">🎬</div>
+          <p class="empty-title">No movie yet</p>
+          <p class="empty-sub">Pick a file, paste a link or a YouTube URL — your partner gets it instantly.</p>
+          <div class="empty-actions">
+            <button class="btn sm" id="btn-pick">Choose file</button>
+            <button class="btn sm ghost" id="btn-link">Paste link</button>
+          </div>
+        </div>
+
+        <div class="tap-play" id="tap-play"><span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></div>
+
+        <div class="controls" id="controls">
+          <div class="ctrl-row">
+            <button class="ctrl-btn" id="btn-play">
+              <svg id="ic-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <span class="time" id="time-cur">0:00</span>
+            <div class="scrub" id="scrub">
+              <div class="scrub-track"><div class="scrub-fill" id="scrub-fill"></div></div>
+              <div class="scrub-knob" id="scrub-knob"></div>
+            </div>
+            <span class="time" id="time-dur">0:00</span>
+            <button class="ctrl-btn ghosty" id="btn-change" aria-label="Change video">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 6h18"/><path d="M7 22l-4-4 4-4"/><path d="M21 18H3"/></svg>
+            </button>
+            <button class="ctrl-btn ghosty" id="btn-full">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="transfer" id="transfer">
+          <div class="transfer-label" id="transfer-label">Sending movie…</div>
+          <div class="transfer-bar"><div id="transfer-fill"></div></div>
+          <div class="transfer-pct" id="transfer-pct">0%</div>
+        </div>
+
+        <button class="fs-exit" id="btn-fs-exit" aria-label="Exit fullscreen">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="chat-wrap">
+      <div class="chat" id="chat"></div>
+      <div class="typing-ind" id="typing-ind">
+        <span class="typing-dots"><i></i><i></i><i></i></span>
+        <span id="typing-text">typing</span>
+      </div>
+    </div>
+
+    <div class="emoji-panel" id="emoji-panel"></div>
+
+    <div class="composer">
+      <div class="reply-bar" id="reply-bar">
+        <div class="reply-bar-inner">
+          <div class="reply-bar-accent"></div>
+          <div class="reply-bar-body">
+            <div class="reply-bar-name" id="reply-bar-name">Replying</div>
+            <div class="reply-bar-text" id="reply-bar-text"></div>
+          </div>
+          <button class="reply-bar-close" id="reply-bar-close" aria-label="Cancel reply">✕</button>
+        </div>
+      </div>
+      <button class="emoji-btn" id="btn-emoji">😊</button>
+      <div class="input-wrap">
+        <textarea id="msg-input" rows="1" placeholder="Message" enterkeyhint="send" maxlength="2000"></textarea>
+      </div>
+      <button class="send-btn" id="btn-send" disabled>
+        <svg viewBox="0 0 24 24"><path d="M3.4 20.4l17.4-8.4L3.4 3.6 3.4 10l12 2-12 2z"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <input type="file" id="file-input" accept="video/*" hidden>
+
+  <div class="sheet-backdrop" id="sheet-backdrop"></div>
+  <div class="sheet" id="sheet">
+    <div class="sheet-handle"></div>
+    <div id="sheet-body"></div>
+  </div>
+
+  <div class="dialog-backdrop" id="dialog-backdrop">
+    <div class="dialog" id="dialog" role="alertdialog" aria-modal="true">
+      <span class="dialog-icon" id="dialog-icon">🎬</span>
+      <h3 id="dialog-title">Are you sure?</h3>
+      <p id="dialog-msg"></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" id="dialog-cancel">Cancel</button>
+        <button class="btn danger" id="dialog-ok">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
