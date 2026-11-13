@@ -31,6 +31,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 | 🎥 **Watch in sync** | Play, pause and seek stay locked together. The host is the playback clock. |
 | ▶️ **YouTube + links** | Paste a YouTube URL, a **YouTube playlist** (every video is listed and queueable in one tap), any direct `.mp4` / `.webm` / `.m3u8` link — or any **web page** link: Reel reads the page and finds the videos on it. |
 | ⏩ **Skip & 2× speed** | −10s / +10s buttons next to play, **double tap the left / right third** of the video to jump 10s, and press-and-hold the right half for 2× speed — every jump and speed-up is synced so both people stay together. |
+| 📐 **Aspect ratio** | For links and files: **Fit / Fill / Stretch** plus a frame preset (16:9, 4:3, 1:1, 21:9 or *Match video*). A phone-sized vertical clip can fill a portrait frame. Saved on your device; YouTube keeps its own player. |
 | 📋 **Playlist** | Queue up to 50 videos in any mix of YouTube / links / HLS streams. Both people add, remove and skip; videos auto-play one after another. |
 | 📁 **Send local files** | Pick one movie — or **several at once**: the first plays now, the rest queue and auto-play in turn, each one streamed to your partner over WebRTC. |
 | 💬 **Chat** | Typing indicators, replies, delivery/read ticks, emoji bursts and swipe-to-reply. |
@@ -122,6 +123,20 @@ How the page reading works, honestly:
 
 Gestures are handled on **pointer events** (`pointerdown` / `pointerup`), not `click`, because mobile browsers delay or swallow the synthetic click of a quick double tap. That is why the double tap works on a phone as well as with a mouse.
 
+### Aspect ratio (direct videos only)
+
+The small **frame icon at the top-left of the player** opens *Aspect ratio*. It works for links and files; YouTube plays in its own player, so the button is hidden there and the box stays 16:9.
+
+| Setting | What it changes |
+|---|---|
+| **Fit** | The picture keeps its shape, with black bars if the box is a different shape (default). |
+| **Fill** | The picture is cropped at the edges so it covers the whole box — good on a phone when you want no bars. |
+| **Stretch** | The picture is stretched to the box, which can distort it. |
+| **Match video** | The *box* copies the clip's own shape (`videoWidth : videoHeight`). A vertical clip is capped in height so it still fits on screen. |
+| **16:9 / 4:3 / 1:1 / 21:9** | The *box* takes that shape, whatever the clip is. |
+
+This is a **per-device preference**: it depends on your own screen, so it is not synced and your partner keeps their own. It is stored in `localStorage` (`reel.aspect.v1`) and comes back after a reload; *Reset to default* returns to Fit + 16:9.
+
 ### Several files at once
 
 The file picker accepts **multiple files**. The first one starts immediately and the rest wait in *Next from this device* inside the playlist sheet; they start automatically when the previous one ends. Each file is streamed to your partner (AES-GCM-256 chunks) when its turn comes, so you both keep watching together.
@@ -160,6 +175,17 @@ The file picker accepts **multiple files**. The first one starts immediately and
 5. **Transport** — chat, reactions, sync commands and file chunks are encrypted with a fresh random 96-bit IV per frame, sent over the DataChannel, and decrypted only by the other browser.
 
 All app frames are queued through a single async pipeline so encryption never reorders messages, and the receiver processes them in order too.
+
+### Switching apps / locking the phone
+
+A phone freezes a hidden tab: timers stop, the signalling socket can drop, and the data channel can die without ever firing `close`. Reel is built for that:
+
+- While the page is hidden the reconnect ladder is **paused**, so no attempts are wasted (and the room is never closed just because you checked a message in another app).
+- On return (`visibilitychange`, `pageshow`, `resume`) it sends an encrypted **ping** and waits 2.5 s for the pong. A dead channel is dropped immediately instead of being trusted because its state still says `open`.
+- The guest then reconnects **at once** — the backoff delays are reset, so the room is back in well under a second on a normal network, without burning retries.
+- The host replaces a stale connection instead of answering *room is full*: a returning partner with the same client id, or a channel whose peer connection has failed, takes the guest seat back.
+- If the other side rebuilt its transport, an incoming `key` frame on an already verified channel restarts the handshake on both ends (rate-limited so replays are ignored).
+- The retry budget is 40 attempts (about 5 minutes) and it restarts every time you come back.
 
 ### Voice calls
 
@@ -243,6 +269,8 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 | Incoming reactions & emoji | 6 burst / 0.5 per second |
 | Incoming file offers | 3 burst |
 | Incoming playlist frames | 16 burst / 2 per second |
+| Incoming liveness probes (`ping`) | 6 burst / 1 per second |
+| Reconnect attempts | 40 per run, reset when the app returns |
 | Outgoing chat | 6 burst / 1.5 per second |
 | Outgoing emoji bursts | 4 burst / 0.4 per second |
 
@@ -289,7 +317,10 @@ The ECDH handshake could not complete. Usually it means one side is on an old ca
 The two sides could not prove the same shared secret. This is the fail-closed path. Leave the room and rejoin; if two different networks always fail, something is tampering with the connection — stop.
 
 **Room says it is full**
-Rooms hold exactly two people. Someone else already took the guest seat; create a new room.
+Rooms hold exactly two people. Someone else already took the guest seat; create a new room. If it was *your* partner coming back from the background, Reel now replaces the stale connection instead — a real third person is still refused.
+
+**The room dropped after I switched apps / locked the screen**
+It should not any more: the retry clock pauses while the app is hidden and reconnects immediately when you return (see [Switching apps](#switching-apps--locking-the-phone)). If it still happens, both people should hard-refresh once so no one runs an old cached version.
 
 **Voice button says "Wait for the encrypted connection…"**
 Voice is only available after the E2E handshake completes and both people are online. If it stays stuck, see the handshake entry above. The call is started from the microphone button in the header.

@@ -46,6 +46,8 @@ const state = {
   playlist: [],           // [{ url, name }] — synced over the E2E channel
   plIndex: -1,            // which playlist item is playing right now
   localQueue: [],         // extra File objects picked here — play after this one
+  pingWait: null,         // pending liveness probe after coming back to the app
+  aspect: { mode: 'fit', frame: '16-9' },   // how a direct video fills the player (local)
 };
 
 /* ---------- helpers ---------- */
@@ -87,7 +89,7 @@ function toast(msg) {
 /* ---------- session persistence ---------- */
 const SESSION_KEY   = 'reel-session';
 const CLIENT_KEY    = 'reel-client-id';
-const MAX_RECONNECT = 15;
+const MAX_RECONNECT = 40;   // ~5 minutes of retries; reset whenever the app returns
 
 function saveSession() {
   try {
@@ -443,6 +445,7 @@ const rxVoice  = makeBucket(4, 0.2);    // incoming voice invitations
 const rxAnim   = makeBucket(6, 0.5);    // incoming reactions / emoji bursts
 const rxFile   = makeBucket(3, 0.05);   // incoming file offers
 const rxPl     = makeBucket(16, 2);     // incoming playlist frames
+const rxPing   = makeBucket(6, 1);      // incoming liveness probes
 const txChat   = makeBucket(6, 1.5);    // outgoing chat messages
 const txAnim   = makeBucket(4, 0.4);    // outgoing emoji bursts
 
@@ -498,6 +501,7 @@ async function startHandshake(conn) {
       kp, pub, peerPub: null, peerRole: null, transcript: null,
       confKey: null, keys: null, verified: false, readyP: null, readyRes: null
     };
+    conn._hsAt = Date.now();
 
     // The partner's frames may have arrived while we were generating keys.
     const pre = conn._pre || [];
@@ -722,8 +726,10 @@ function onIncoming(conn) {
 
   // If we already have a live partner connection
   if (state.conn && state.conn.open) {
-    // Same guest reconnecting → replace the stale connection
-    if (incomingId && state.partnerClientId && incomingId === state.partnerClientId) {
+    // Same guest reconnecting, or a channel the relay never closed (a phone
+    // that slept leaves a zombie behind) → replace the stale connection
+    if ((incomingId && state.partnerClientId && incomingId === state.partnerClientId) ||
+        connIsZombie(state.conn)) {
       try { state.conn.close(); } catch (e) {}
       state.conn = null;
       wireConn(conn);
@@ -742,13 +748,26 @@ function onIncoming(conn) {
   wireConn(conn);
 }
 
+/* A DataConnection can report open while the underlying transport is gone —
+   a phone that slept leaves exactly that behind. The host must replace it
+   instead of answering "room is full" to the partner who just came back. */
+function connIsZombie(conn) {
+  const pc = conn.peerConnection;
+  if (pc && (pc.connectionState === 'failed' || pc.connectionState === 'closed' ||
+             pc.signalingState === 'closed')) return true;
+  if (!state.secure && conn._openedAt && Date.now() - conn._openedAt > 15000) return true;
+  return false;
+}
+
 function wireConn(conn) {
   state.conn = conn;
+  conn._hs = null;        // a reused transport must start a fresh handshake
   state.partnerPeerId = conn.peer || '';
   let opened = false;
 
   conn.on('open', () => {
     opened = true;
+    conn._openedAt = Date.now();
     state.connected = true;
     state.reconnectAttempts = 0;
     clearTimeout(state.reconnectTimer);
@@ -852,6 +871,17 @@ function onData(conn, data) {
   switch (msg.t) {
     case 'key':
     case 'auth':
+      if (msg.t === 'key' && conn._hs && conn._hs.verified) {
+        // The partner rebuilt its side of the transport and is re-handshaking
+        // on a connection object we still hold (mobile app switching). Restart
+        // ours as well, otherwise we would keep the stale keys and go silent.
+        if (Date.now() - (conn._hsAt || 0) < 1200) return;   // ignore replays
+        conn._hs = null;
+        if (state.conn === conn) resetCrypto();
+        conn._pre = [msg];
+        startHandshake(conn);
+        return;
+      }
       if (!conn._hs) {
         // Key material can arrive before we finished generating our own.
         if (!conn._pre) conn._pre = [];
@@ -1056,6 +1086,25 @@ function onSecureMessage(data) {
     case 'typing':
       showRemoteTyping(data.on === true);
       break;
+
+    /* Liveness probe, sent when the app comes back from the background: a
+       frozen tab can leave a data channel "open" that is actually dead. */
+    case 'ping': {
+      if (!takeToken(rxPing)) break;
+      const ts = Number(data.ts);
+      if (!Number.isFinite(ts)) break;
+      send({ t: 'pong', ts });
+      break;
+    }
+
+    case 'pong': {
+      const w = state.pingWait;
+      if (!w || w.ts !== Number(data.ts)) break;
+      state.pingWait = null;
+      clearTimeout(w.timer);
+      w.resolve(true);
+      break;
+    }
 
     case 'cmd': {
       if (data.a === 'rate') {
@@ -1840,6 +1889,7 @@ function enterRoom(sysText) {
   state.joinAnnounced = false;
   state.securityFailure = false;
   state.partnerPeerId = '';
+  hiddenSince = document.hidden ? Date.now() : 0;
   if (!state.conn) resetCrypto();
   destroyYouTube();
   revokeBlob();
@@ -1867,6 +1917,7 @@ function leaveRoom() {
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
   state.reconnectAttempts = 0;
+  hiddenSince = 0;
   destroyPeer();
   clearSession();
   state.role = null;
@@ -1932,11 +1983,108 @@ function announceJoin(name) {
   addSystem(state.role === 'guest' ? 'Connected to ' + who : who + ' joined the room');
 }
 
+/* ---------- coming back from the background (phones) ----------
+   A hidden mobile tab is frozen: timers stop, the signalling socket can drop
+   and the data channel can die without ever firing "close". Reconnecting while
+   frozen is impossible, so the old code burned its 15 attempts and closed the
+   room while the app sat in the background. Now the retry clock pauses while
+   hidden, and on the way back we probe the channel and rebuild it at once. */
+const PING_MS = 2500;
+let hiddenSince = 0;
+
+function pingPartner() {
+  return new Promise(resolve => {
+    if (!state.secure || !state.conn || !state.conn.open) { resolve(false); return; }
+    if (state.pingWait) { resolve(true); return; }   // one probe at a time
+    const ts = Date.now();
+    const timer = setTimeout(() => {
+      if (state.pingWait && state.pingWait.ts === ts) {
+        state.pingWait = null;
+        resolve(false);
+      }
+    }, PING_MS);
+    state.pingWait = { ts, timer, resolve };
+    if (!send({ t: 'ping', ts })) {
+      state.pingWait = null;
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
+}
+
+/* Tear down a channel we know is dead without waiting for its close timeout. */
+function dropDeadConn() {
+  const c = state.conn;
+  state.pingWait = null;
+  if (!c) return;
+  if (state.conn === c) { state.conn = null; state.partnerPeerId = ''; }
+  state.connected = false;
+  state.partnerOnline = false;
+  state.joinAnnounced = false;
+  resetCrypto();
+  state.recv = null;
+  state.sending = false;
+  try { c.close(); } catch (e) {}
+  updatePartnerUI();
+}
+
+function onAppHidden() {
+  if (hiddenSince) return;
+  hiddenSince = Date.now();
+  // no point running the retry clock inside a frozen page
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+}
+
+async function onAppVisible() {
+  if (!hiddenSince) return;
+  hiddenSince = 0;
+  if (state.intentionalLeave || !state.code || !state.role) return;
+
+  // Being away is not a failed attempt: restart the ladder from scratch and
+  // ignore the backoff delay so the room is back before the user notices.
+  state.reconnectAttempts = 0;
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+
+  const alive = await pingPartner();
+  if (alive) { updatePartnerUI(); return; }
+
+  dropDeadConn();
+
+  if (state.role === 'guest') {
+    if (state.peer && state.peer.disconnected) {
+      try { state.peer.reconnect(); } catch (e) {}
+    }
+    doGuestConnect();          // immediate, no backoff
+    clearTimeout(state.reconnectTimer);   // the drop may have queued one
+    state.reconnectTimer = null;
+    return;
+  }
+
+  // Host: re-register the room if the signalling socket went away, otherwise
+  // just wait — the guest reconnects to the same code and replaces the channel.
+  if (!state.peer || state.peer.destroyed) {
+    rearmHost();
+    return;
+  }
+  if (state.peer.disconnected) {
+    try { state.peer.reconnect(); } catch (e) {}
+    setTimeout(() => {
+      if (!state.intentionalLeave && state.code && state.peer && state.peer.disconnected) rearmHost();
+    }, 2500);
+  }
+}
+
 /* ---------- auto reconnect ---------- */
 function scheduleGuestReconnect() {
   if (state.intentionalLeave || state.role !== 'guest' || state.connected) return;
   if (state.securityFailure) return;      // never auto-retry a failed handshake
   if (state.reconnectTimer) return;
+
+  // A hidden phone tab is frozen: retrying now is pointless and every failed
+  // attempt would burn the ladder. onAppVisible() retries the moment we return.
+  if (document.hidden) { hiddenSince = hiddenSince || Date.now(); return; }
 
   if (state.reconnectAttempts >= MAX_RECONNECT) {
     toast('Room closed');
@@ -2153,6 +2301,111 @@ function shareMediaState() {
     send({ t: 'cmd', a: paused ? 'pause' : 'play', time: t });
   }
 }
+
+/* =========================================================
+   ASPECT RATIO - how a direct video fills the player box.
+   It depends on *your* screen, so it is a local preference and
+   is not synced. YouTube uses its own player, so it does not
+   apply there (the button is hidden and the frame stays 16:9).
+   ========================================================= */
+const ASPECT_KEY = 'reel.aspect.v1';
+const ASPECT_MODES = [
+  { id: 'fit',     label: 'Fit' },
+  { id: 'fill',    label: 'Fill' },
+  { id: 'stretch', label: 'Stretch' },
+];
+const ASPECT_FRAMES = [
+  { id: 'auto',  label: 'Match video' },
+  { id: '16-9',  label: '16:9' },
+  { id: '4-3',   label: '4:3' },
+  { id: '1-1',   label: '1:1' },
+  { id: '21-9',  label: '21:9' },
+];
+
+function loadAspect() {
+  const def = { mode: 'fit', frame: '16-9' };
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(ASPECT_KEY) || 'null'); } catch (e) {}
+  if (!raw || typeof raw !== 'object') return def;
+  return {
+    mode: ASPECT_MODES.some(m => m.id === raw.mode) ? raw.mode : def.mode,
+    frame: ASPECT_FRAMES.some(f => f.id === raw.frame) ? raw.frame : def.frame,
+  };
+}
+
+function saveAspect() {
+  try { localStorage.setItem(ASPECT_KEY, JSON.stringify(state.aspect)); } catch (e) {}
+}
+
+function applyAspect() {
+  const a = state.aspect;
+  videoWrap.classList.toggle('ar-fill', a.mode === 'fill');
+  videoWrap.classList.toggle('ar-stretch', a.mode === 'stretch');
+  ASPECT_FRAMES.forEach(f => videoWrap.classList.toggle('frame-' + f.id, a.frame === f.id));
+  videoWrap.classList.remove('frame-tall');
+  if (a.frame === 'auto') updateAutoFrame();
+  else videoWrap.style.aspectRatio = '';
+}
+
+/* "Match video": the player box copies the clip's own shape. */
+function updateAutoFrame() {
+  if (state.aspect.frame !== 'auto') return;
+  const w = video.videoWidth | 0, h = video.videoHeight | 0;
+  if (w > 0 && h > 0) {
+    videoWrap.style.aspectRatio = w + ' / ' + h;
+    videoWrap.classList.toggle('frame-tall', w / h < 0.95);
+  } else {
+    videoWrap.style.aspectRatio = '';
+    videoWrap.classList.remove('frame-tall');
+  }
+}
+video.addEventListener('loadedmetadata', updateAutoFrame);
+video.addEventListener('resize', updateAutoFrame);
+
+function openAspectSheet() {
+  haptic(8);
+  const a = state.aspect;
+  openSheet(`
+    <h3>Aspect ratio</h3>
+    <p>For links and files. YouTube plays in its own player, so this does not apply there.</p>
+    <div class="ar-group">
+      <span class="ar-label">Fit</span>
+      <div class="ar-chips">${ASPECT_MODES.map(m =>
+        `<button class="ar-chip${a.mode === m.id ? ' on' : ''}" data-mode="${m.id}">${m.label}</button>`).join('')}</div>
+    </div>
+    <div class="ar-group">
+      <span class="ar-label">Frame</span>
+      <div class="ar-chips">${ASPECT_FRAMES.map(f =>
+        `<button class="ar-chip${a.frame === f.id ? ' on' : ''}" data-frame="${f.id}">${f.label}</button>`).join('')}</div>
+    </div>
+    <p class="ar-note"><b>Fit</b> keeps the whole picture inside the frame (black bars), <b>Fill</b> crops the edges to fill it, <b>Stretch</b> may distort. <b>Frame</b> changes the shape of the player box itself — <b>Match video</b> uses the clip's own shape. Saved on this device; your partner keeps their own.</p>
+    <button class="btn ghost" id="ar-reset">Reset to default</button>
+  `);
+
+  const pick = (key, id) => {
+    if (state.aspect[key] === id) return;
+    state.aspect[key] = id;
+    haptic(6);
+    saveAspect();
+    applyAspect();
+    openAspectSheet();          // repaint the selection
+  };
+  sheetBody.querySelectorAll('[data-mode]').forEach(b =>
+    b.addEventListener('click', () => pick('mode', b.dataset.mode)));
+  sheetBody.querySelectorAll('[data-frame]').forEach(b =>
+    b.addEventListener('click', () => pick('frame', b.dataset.frame)));
+  $('#ar-reset').addEventListener('click', () => {
+    state.aspect = { mode: 'fit', frame: '16-9' };
+    haptic(6);
+    saveAspect();
+    applyAspect();
+    openAspectSheet();
+  });
+}
+
+state.aspect = loadAspect();
+applyAspect();
+$('#btn-aspect').addEventListener('click', () => openAspectSheet());
 
 /* =========================================================
    PLAYLIST - synced through the encrypted channel.
@@ -2947,7 +3200,7 @@ videoWrap.addEventListener('pointerdown', e => {
   if (!state.mediaLoaded || state.isYT || scrubbing) return;
   if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
       e.target.closest('.tap-play') || e.target.closest('.transfer') ||
-      e.target.closest('.fs-exit')) return;
+      e.target.closest('.fs-exit') || e.target.closest('.ar-btn')) return;
 
   // remember the press so pointerup can tell a tap from a hold / drag
   tapStart = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now() };
@@ -4016,6 +4269,15 @@ window.addEventListener('beforeunload', e => {
   if (state.connected) { e.preventDefault(); e.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => { closeVoice(false); });
+
+/* Phone app switching / screen off. The page is frozen while hidden, so the
+   retry clock pauses and a liveness probe runs the moment we come back. */
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) onAppHidden(); else onAppVisible();
+});
+window.addEventListener('pageshow', e => { if (e.persisted) onAppVisible(); });
+document.addEventListener('freeze', onAppHidden);
+document.addEventListener('resume', onAppVisible);
 
 // splash + resume previous session
 window.addEventListener('load', () => {

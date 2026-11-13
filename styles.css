@@ -318,6 +318,34 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   transition:box-shadow .25s;
 }
 #video{width:100%;height:100%;object-fit:contain;display:block;background:#141210}
+/* how the picture sits inside the frame (set from the aspect sheet) */
+.video-wrap.ar-fill #video{object-fit:cover}
+.video-wrap.ar-stretch #video{object-fit:fill}
+/* frame shapes: the player box itself takes this ratio */
+.video-wrap.frame-16-9{aspect-ratio:16/9}
+.video-wrap.frame-4-3{aspect-ratio:4/3}
+.video-wrap.frame-1-1{aspect-ratio:1/1}
+.video-wrap.frame-21-9{aspect-ratio:21/9}
+/* "Match video" + a vertical clip: keep the tall box on screen */
+.video-wrap.frame-tall{
+  width:auto;height:min(72vh, 420px);max-width:100%;
+  margin-left:auto;margin-right:auto;
+}
+/* YouTube always uses its own 16:9 player */
+.video-wrap.is-yt{aspect-ratio:16/9;width:100%;height:auto;margin-left:0;margin-right:0}
+/* button that opens the aspect sheet - direct videos only, fades with controls */
+.ar-btn{
+  position:absolute;top:12px;left:12px;z-index:6;
+  width:30px;height:30px;display:grid;place-items:center;
+  background:rgba(27,24,21,.62);border:1.5px solid rgba(255,255,255,.4);
+  border-radius:50% 46% 54% 48%/48% 54% 46% 50%;color:#fff;cursor:pointer;
+  transition:opacity .3s ease, transform .12s var(--spring), background .2s;
+}
+.ar-btn svg{width:15px;height:15px}
+.ar-btn:active{transform:scale(.9);background:rgba(27,24,21,.86)}
+.video-wrap.idle .ar-btn{opacity:0;pointer-events:none}
+.video-wrap.is-yt .ar-btn,
+.video-wrap:not(.has-media) .ar-btn{display:none}
 /* Sits right above the <video> but below every overlay (they come later in the
    DOM), so it swallows the native long-press menu without hiding the controls. */
 .video-hit{
@@ -362,6 +390,12 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 }
 .video-wrap:fullscreen #video,
 .video-wrap:-webkit-full-screen #video{object-fit:contain}
+.video-wrap:fullscreen.ar-fill #video,
+.video-wrap:-webkit-full-screen.ar-fill #video,
+.video-wrap.fake-landscape.ar-fill #video{object-fit:cover}
+.video-wrap:fullscreen.ar-stretch #video,
+.video-wrap:-webkit-full-screen.ar-stretch #video,
+.video-wrap.fake-landscape.ar-stretch #video{object-fit:fill}
 .video-wrap:fullscreen .controls,
 .video-wrap:-webkit-full-screen .controls{padding-bottom:calc(var(--safe-b) + 16px)}
 
@@ -690,6 +724,23 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   font-size:11px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
   color:var(--muted);margin:2px 0 8px;
 }
+
+/* --- aspect ratio sheet --- */
+.ar-group{margin-bottom:14px}
+.ar-label{
+  display:block;font-size:11px;font-weight:700;letter-spacing:1.4px;
+  text-transform:uppercase;color:var(--muted);margin-bottom:8px;
+}
+.ar-chips{display:flex;flex-wrap:wrap;gap:8px}
+.ar-chip{
+  padding:9px 14px;border-radius:999px;cursor:pointer;
+  background:var(--card);border:2px solid var(--paper-2);
+  font-size:13px;font-weight:700;color:var(--ink);
+  transition:transform .12s var(--spring), background .18s, border-color .18s;
+}
+.ar-chip:active{transform:scale(.95)}
+.ar-chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.ar-note{font-size:11.5px;line-height:1.55;color:var(--muted);margin-bottom:14px}
 
 /* --- link finder results --- */
 .crawl-status{font-size:13px;color:var(--ink-2);margin:2px 0 10px;font-weight:500}
