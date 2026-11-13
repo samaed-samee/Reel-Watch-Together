@@ -11,6 +11,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 ## Table of contents
 - [Features](#features)
 - [Quick start](#quick-start)
+- [Install as an app (PWA)](#install-as-an-app-pwa)
 - [How it works](#how-it-works)
 - [Security model](#security-model)
 - [Limits & rate limits](#limits--rate-limits)
@@ -35,6 +36,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 | 🔐 **End-to-end encryption** | Authenticated ECDH + HKDF + AES-GCM-256, plus a safety code to detect a man-in-the-middle. |
 | 👥 **Rooms of exactly two** | The host accepts one guest; anyone else is turned away. |
 | 📱 **Mobile-first** | Safe-area aware, keyboard-aware composer, fullscreen with landscape lock. |
+| 📲 **Installable (PWA)** | One-tap install to the home screen: standalone window, custom app icon and an offline app shell. |
 
 ---
 
@@ -59,6 +61,27 @@ Then open <http://localhost:8000>.
 5. Tap the **microphone** in the header to start an encrypted voice call. Your partner gets a join prompt; tap the same button (or the mute button in the call bar) to mute.
 
 > The code is the only credential. Share it privately — anyone who has it can take the guest seat.
+
+---
+
+## Install as an app (PWA)
+
+Reel is a Progressive Web App. Once installed it opens in its own window with no browser bars, shows the reel icon on your home screen / desktop / taskbar, and its shell (HTML, CSS, JS, icons) is cached by a service worker so the home screen loads instantly even on a bad connection.
+
+A dark **install banner** with a soft glow slides in from the top of the home screen whenever the app is installable. Dismissing it hides the banner for that visit only — it returns on the next refresh. Once the app is installed the banner stops appearing, and if you uninstall it, the banner comes back on your next visit.
+
+| Platform | How to install |
+|---|---|
+| **Android** (Chrome, Edge, Samsung Internet) | Tap **Install** on the top banner, or ⋮ menu → *Add to Home screen*. |
+| **Windows / macOS** (Chrome, Edge) | Click the **install icon** at the right end of the address bar, or ⋮ → *Cast, save and share* → *Install page as app*. |
+| **iOS / iPadOS** (Safari only) | The banner explains it: tap **Share** → **Add to Home Screen**. Apple does not support one-tap install prompts or standalone windows for other browsers. |
+
+Notes:
+
+- Installation requires the app to be served (not opened as a file) and works best over `http://localhost` for local use.
+- The service worker caches only same-origin files. PeerJS signalling, fonts and YouTube always come from the network — the app still needs internet to connect a room, the cache just removes the loading wait.
+- If you change `app.js`, `styles.css` or other app files, bump the `VERSION` constant at the top of `sw.js` (e.g. `reel-shell-v1` → `reel-shell-v2`), or visitors may keep getting the old cached files.
+- The icon files live in `icons/` and can be regenerated any time with `powershell -File icons\make-icons.ps1`.
 
 ---
 
@@ -177,8 +200,11 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 Reel - watch together/
 ├─ index.html      markup + CSP + meta (no inline scripts)
 ├─ styles.css      all styling (paper theme, chat, player, sheets)
-├─ app.js          all application logic (sync, chat, voice, E2E crypto)
+├─ app.js          all application logic (sync, chat, voice, E2E crypto, PWA banner)
 ├─ boot.js         tiny Android safe-area bootstrap (runs before CSS)
+├─ manifest.json   PWA manifest (name, icon sizes, standalone display)
+├─ sw.js           service worker (offline app shell, versioned cache)
+├─ icons/          app icons (any + maskable + apple-touch) and the generator script
 ├─ start.cmd       Windows launcher: local server + opens browser
 └─ README.md       this file
 ```

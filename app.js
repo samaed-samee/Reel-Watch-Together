@@ -2973,6 +2973,94 @@ nameInput.addEventListener('input', () => {
 });
 
 /* =========================================================
+   PWA - install banner + service worker
+   Dismissal is per-visit only: a refresh brings the banner back.
+   Once the app is installed the banner never shows (standalone
+   mode), and it comes back automatically after an uninstall.
+   ========================================================= */
+let deferredInstall = null;            // saved beforeinstallprompt event
+let installDismissedThisLoad = false;  // ✕ / "Got it" hides it until the next visit
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+function showInstallBanner(mode) {   // mode: 'native' | 'ios'
+  const b = $('#install-banner');
+  if (!b || installDismissedThisLoad || isStandalone()) return;
+  // never interrupt someone already inside a room
+  if ($('#view-room') && !$('#view-room').classList.contains('hidden')) return;
+  if (mode === 'ios') {
+    $('#ib-title').textContent = 'Add Reel to your home screen';
+    $('#ib-sub').textContent = 'In Safari: tap Share, then Add to Home Screen.';
+    $('#ib-install').textContent = 'Got it';
+  }
+  b.classList.add('show');
+}
+
+function hideInstallBanner() {
+  const b = $('#install-banner');
+  if (b) b.classList.remove('show');
+}
+
+function initPWA() {
+  const b = $('#install-banner');
+  if (b) {
+    $('#ib-install').addEventListener('click', () => {
+      if (deferredInstall) {
+        const p = deferredInstall;
+        deferredInstall = null;
+        p.prompt();
+        p.userChoice.then(choice => {
+          if (choice && choice.outcome === 'accepted') {
+            hideInstallBanner();           // appinstalled also fires and toasts
+          } else {
+            installDismissedThisLoad = true;   // they said no - quiet until next visit
+            hideInstallBanner();
+          }
+        }).catch(() => {});
+      } else {
+        // iOS hint banner: the button is just an acknowledgement
+        installDismissedThisLoad = true;
+        hideInstallBanner();
+      }
+    });
+    $('#ib-close').addEventListener('click', () => {
+      installDismissedThisLoad = true;     // per-visit only; refresh shows it again
+      hideInstallBanner();
+    });
+  }
+
+  // Chromium desktop + Android
+  window.addEventListener('beforeinstallprompt', e => {
+    if (!e || typeof e.prompt !== 'function') return;
+    e.preventDefault();
+    deferredInstall = e;
+    setTimeout(() => showInstallBanner('native'), 2500);
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstall = null;
+    installDismissedThisLoad = true;       // installed - banner stays gone
+    hideInstallBanner();
+    toast('Reel installed — look for it on your home screen');
+  });
+
+  // iOS Safari never fires beforeinstallprompt, so offer the manual steps
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (isIOS && !isStandalone()) {
+    setTimeout(() => showInstallBanner('ios'), 3500);
+  }
+
+  // offline app shell (localhost is a secure context, so this is allowed)
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('sw.js', { scope: './' }).catch(() => {});
+  }
+}
+initPWA();
+
+/* =========================================================
    MISC
    ========================================================= */
 // prevent double-tap zoom on iOS

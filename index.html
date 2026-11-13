@@ -2,14 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; script-src 'self' https://unpkg.com https://www.youtube.com https://www.youtube-nocookie.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data: https: http:; connect-src 'self' https: wss: ws:; frame-src https://www.youtube.com https://www.youtube-nocookie.com; child-src https://www.youtube.com https://www.youtube-nocookie.com;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; script-src 'self' https://unpkg.com https://www.youtube.com https://www.youtube-nocookie.com; worker-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data: https: http:; connect-src 'self' https: wss: ws:; frame-src https://www.youtube.com https://www.youtube-nocookie.com; child-src https://www.youtube.com https://www.youtube-nocookie.com;">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F4EFE4">
+<meta name="apple-mobile-web-app-title" content="Reel">
 <title>Reel · Watch Together</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <script src="boot.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -53,7 +57,7 @@
 
     <div class="hero">
       <h1>Movie night,<br><em>just the two</em> of you.</h1>
-      <p>Share a code, hit play, and stay in sync. No sign-ups, nothing to install.</p>
+      <p>Share a code, hit play, and stay in sync. No sign-ups — installs to your home screen in one tap.</p>
     </div>
 
     <div class="home-actions">
@@ -225,6 +229,18 @@
         <button class="btn danger" id="dialog-ok">Yes</button>
       </div>
     </div>
+  </div>
+
+  <div class="install-banner" id="install-banner" role="region" aria-label="Install Reel on this device">
+    <img class="ib-icon" src="icons/icon-192.png" alt="" width="40" height="40">
+    <div class="ib-body">
+      <div class="ib-title" id="ib-title">Add Reel to your home screen</div>
+      <div class="ib-sub" id="ib-sub">One tap from your home screen — nothing to download.</div>
+    </div>
+    <button class="ib-btn" id="ib-install">Install</button>
+    <button class="ib-close" id="ib-close" aria-label="Dismiss install banner">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
   </div>
 
   <div id="toast"></div>

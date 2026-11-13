@@ -643,6 +643,50 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 }
 #toast.show{opacity:1;transform:translate(-50%,0)}
 
+/* --- install banner (PWA) --- */
+.install-banner{
+  position:fixed;left:0;right:0;top:0;z-index:8500;
+  display:flex;align-items:center;gap:12px;
+  padding:calc(10px + var(--safe-t)) 14px 10px;
+  background:var(--ink);color:var(--card);
+  box-shadow:0 8px 24px rgba(27,24,21,.28);
+  transform:translateY(-105%);visibility:hidden;
+  transition:transform .55s var(--spring), visibility .55s;
+}
+.install-banner.show{
+  transform:translateY(0);visibility:visible;
+  animation:ib-glow 2.6s ease-in-out .8s infinite;
+}
+@keyframes ib-glow{
+  0%,100%{box-shadow:0 8px 24px rgba(27,24,21,.28), 0 0 0 rgba(240,81,75,0)}
+  50%    {box-shadow:0 8px 24px rgba(27,24,21,.28), 0 0 30px rgba(240,81,75,.5)}
+}
+.ib-icon{border-radius:10px;flex:0 0 auto;display:block}
+.ib-body{flex:1;min-width:0}
+.ib-title{font-weight:700;font-size:14px;letter-spacing:-.1px}
+.ib-sub{font-size:12px;color:rgba(255,252,245,.72);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib-btn{
+  flex:0 0 auto;border:none;cursor:pointer;
+  background:var(--accent);color:#fff;
+  font-family:inherit;font-weight:700;font-size:13px;
+  padding:9px 16px;border-radius:999px;
+  box-shadow:0 0 0 rgba(240,81,75,.55);
+  animation:ib-btn-glow 2.6s ease-in-out .8s infinite;
+  transition:transform .18s var(--spring);
+}
+.ib-btn:active{transform:scale(.93)}
+@keyframes ib-btn-glow{
+  0%,100%{box-shadow:0 0 0 rgba(240,81,75,0)}
+  50%    {box-shadow:0 0 18px rgba(240,81,75,.85)}
+}
+.ib-close{
+  flex:0 0 auto;border:none;background:transparent;cursor:pointer;
+  color:rgba(255,252,245,.65);padding:8px;margin-right:-4px;
+}
+.ib-close svg{width:15px;height:15px;display:block;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
+.ib-close:active{transform:scale(.9)}
+
 /* --- floating emoji --- */
 .float-layer{position:fixed;inset:0;pointer-events:none;z-index:9400;overflow:hidden}
 .float-emoji{
