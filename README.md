@@ -29,10 +29,10 @@ Everything that travels between the two devices — chat, reactions, playback co
 | | |
 |---|---|
 | 🎥 **Watch in sync** | Play, pause and seek stay locked together. The host is the playback clock. |
-| ▶️ **YouTube + links** | Paste a YouTube URL, any direct `.mp4` / `.webm` / `.m3u8` link — or any **web page** link: Reel reads the page and finds the videos on it. |
-| ⏩ **Skip & 2× speed** | −10s / +10s buttons next to play, and press-and-hold the right side of the video for 2× speed — the speed-up is synced so both people stay together. |
+| ▶️ **YouTube + links** | Paste a YouTube URL, a **YouTube playlist** (every video is listed and queueable in one tap), any direct `.mp4` / `.webm` / `.m3u8` link — or any **web page** link: Reel reads the page and finds the videos on it. |
+| ⏩ **Skip & 2× speed** | −10s / +10s buttons next to play, **double tap the left / right third** of the video to jump 10s, and press-and-hold the right half for 2× speed — every jump and speed-up is synced so both people stay together. |
 | 📋 **Playlist** | Queue up to 50 videos in any mix of YouTube / links / HLS streams. Both people add, remove and skip; videos auto-play one after another. |
-| 📁 **Send a local file** | Pick a movie from your device; it is streamed to your partner over WebRTC. |
+| 📁 **Send local files** | Pick one movie — or **several at once**: the first plays now, the rest queue and auto-play in turn, each one streamed to your partner over WebRTC. |
 | 💬 **Chat** | Typing indicators, replies, delivery/read ticks, emoji bursts and swipe-to-reply. |
 | 🎙️ **Live voice** | Encrypted peer-to-peer voice with one-tap mute, speaking glow and a live waveform. |
 | 😍 **Reactions** | Double-tap a message. One reaction per person, tap again to remove it. |
@@ -92,19 +92,35 @@ Notes:
 
 ### Paste any page, get the videos
 
-**Paste a link** accepts three kinds of URL:
+**Paste a link** accepts four kinds of URL:
 
 | You paste | What happens |
 |---|---|
-| A YouTube link | Plays in the built-in YouTube player (unchanged). |
+| A YouTube video link | Plays in the built-in YouTube player (unchanged). |
+| A **YouTube playlist** link (`…?list=PL…`) | Reel lists every video in the playlist, so you can *Play* one, *+ Queue* one, or **Add all** to the queue in a single tap. |
 | A direct video file — `.mp4` `.webm` `.ogv` `.ogg` `.mov` `.m4v` `.mkv` `.m3u8` `.mpd` | Plays directly. `.m3u8` (HLS) uses **hls.js** on browsers without native HLS (Safari plays it natively). |
 | Any other web page | Reel **reads the page** and lists every video it can find — then you pick *Play* / *+ Queue* per video, or **Add all** to queue the whole page. |
 
 How the page reading works, honestly:
 
-- Browsers cannot read another site's HTML directly (CORS). Reel first tries a plain `fetch`, and if that is blocked it falls back to public CORS proxies (`api.allorigins.win`, `corsproxy.io`). That means the page URL you crawl is seen by those third-party services, and a flaky proxy day can make crawling fail — pasting a direct video link always works as a fallback.
+- Browsers cannot read another site's HTML directly (CORS). Reel first tries a plain `fetch`, and if that is blocked it falls back to public CORS proxies (`api.allorigins.win`, `api.codetabs.com`). That means the page URL you crawl is seen by those third-party services, and a flaky proxy day can make crawling fail — pasting a direct video link always works as a fallback.
+- For YouTube playlists Reel tries three readers in order: the reader proxy `r.jina.ai` (markdown, usually the first ~100 videos with titles), the playlist page through a CORS proxy, and finally YouTube's playlist RSS feed (always works, but only the 15 newest videos).
 - The page is scanned for `<video>` / `<source>` tags, `og:video` / `twitter:player:stream` meta tags, JSON-LD `VideoObject` entries, and `.mp4/.webm/.m3u8/...` URLs inside the page's scripts.
 - Sites that need a login or DRM (Netflix, Prime, private Instagram/TikTok) can never work — no browser-side tool can open those.
+
+### Player gestures
+
+| Gesture on a direct video | Result |
+|---|---|
+| Single tap | Shows / hides the controls. |
+| **Double tap the right third** | +10 seconds, synced to your partner (a `⏩ +10s` pill flashes). |
+| **Double tap the left third** | −10 seconds, synced (a `⏪ −10s` pill flashes). |
+| **Press and hold the right half** | 2× speed while held, then back to 1× — synced. |
+| `-10s` / `+10s` buttons | Same jumps from the control bar. |
+
+### Several files at once
+
+The file picker accepts **multiple files**. The first one starts immediately and the rest wait in *Next from this device* inside the playlist sheet; they start automatically when the previous one ends. Each file is streamed to your partner (AES-GCM-256 chunks) when its turn comes, so you both keep watching together.
 
 ### Playlist
 
@@ -113,6 +129,7 @@ How the page reading works, honestly:
 - The playlist button lives in the player controls (list icon) and in *Room options*.
 - Up to 50 videos, names capped at 120 characters, incoming playlist frames rate-limited like everything else.
 - On reconnect the host's playlist snapshot (`pl-sync`) restores the list on the other side.
+- Files you picked on this device are listed separately (dashed rows) — they are not part of the synced list, because a local file has no URL to send; the bytes are transferred before each one starts.
 
 ---
 

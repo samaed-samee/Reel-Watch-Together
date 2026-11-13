@@ -45,6 +45,7 @@ const state = {
   replyTo: null,
   playlist: [],           // [{ url, name }] — synced over the E2E channel
   plIndex: -1,            // which playlist item is playing right now
+  localQueue: [],         // extra File objects picked here — play after this one
 };
 
 /* ---------- helpers ---------- */
@@ -1072,6 +1073,7 @@ function onSecureMessage(data) {
     case 'media-url': {
       const url = safeMediaUrl(data.url);
       if (!url) break;
+      state.localQueue = [];
       state.mediaUrl = url;
       state.mediaName = String(data.name || 'Shared movie').slice(0, MAX_MEDIA_NAME);
       setMedia(url, state.mediaName);
@@ -1885,6 +1887,7 @@ function leaveRoom() {
   state.mediaUrl = null;
   state.playlist = [];
   state.plIndex = -1;
+  state.localQueue = [];
   plLastAdvance = 0;
   $('#tap-play').classList.remove('show');
   videoWrap.classList.remove('has-media');
@@ -2235,6 +2238,7 @@ function plJumpLocal(i) {
   const it = state.playlist[i];
   if (!it) return;
   if (!state.secure) { toast('Wait for the encrypted connection'); return; }
+  state.localQueue = [];       // an explicit playlist jump ends the local queue
   state.plIndex = i;
   renderPlaylistUI();
   state.mediaUrl = it.url;
@@ -2256,7 +2260,11 @@ function plAdvanceMaybe() {
   plJumpLocal(next);
 }
 
-video.addEventListener('ended', () => { if (!state.isYT) plAdvanceMaybe(); });
+video.addEventListener('ended', () => {
+  if (state.isYT) return;
+  if (state.localQueue.length && playNextLocal()) return;   // files picked together
+  plAdvanceMaybe();
+});
 
 /* ----- playlist sheet ----- */
 let plSheetOpen = false;
@@ -2273,29 +2281,48 @@ function openPlaylistSheet() {
 function renderPlaylistSheet() {
   plSheetOpen = true;
   const n = state.playlist.length;
+  const q = state.localQueue;
   const rows = state.playlist.map((it, i) => `
     <div class="pl-row${i === state.plIndex ? ' now' : ''}" data-i="${i}">
       <div class="pl-num">${i === state.plIndex ? '▶' : (i + 1)}</div>
       <div class="pl-name">${escHtml(it.name)}</div>
       <button class="pl-del" data-del="${i}" aria-label="Remove from playlist">✕</button>
     </div>`).join('');
+  const localRows = q.map((f, i) => `
+    <div class="pl-row local" data-local="${i}">
+      <div class="pl-num">📁</div>
+      <div class="pl-name">${escHtml(String(f.name || 'movie'))}</div>
+      <button class="pl-del" data-ldel="${i}" aria-label="Remove from this device's queue">✕</button>
+    </div>`).join('');
+  const intro = n
+    ? n + ' video' + (n > 1 ? 's' : '') + ' — tap one to play it for both of you. Videos play one after another automatically.'
+    : (q.length
+      ? 'These files play one after another automatically — your partner gets each one when it starts.'
+      : 'Nothing queued yet. Paste a link (a YouTube playlist works too), or choose several files at once.');
   openSheet(`
     <h3>Playlist</h3>
-    <p>${n
-      ? n + ' video' + (n > 1 ? 's' : '') + ' — tap one to play it for both of you. Videos play one after another automatically.'
-      : 'Nothing queued yet. Use <b>Paste a link</b> — pages with several videos can be added to the queue in one go.'}</p>
+    <p>${intro}</p>
     <div class="pl-list">${rows}</div>
+    ${q.length ? `<div class="pl-sub">Next from this device (${q.length})</div><div class="pl-list">${localRows}</div>` : ''}
     ${n ? '<button class="btn ghost" id="pl-clear">Clear playlist</button>' : ''}
   `);
   sheetBody.querySelectorAll('.pl-row').forEach(row => {
     row.addEventListener('click', e => {
       if (e.target.closest('.pl-del')) return;
+      if (row.dataset.local !== undefined) return;   // local files play by themselves
       closeSheet();
       plJumpLocal(Number(row.dataset.i));
     });
   });
   sheetBody.querySelectorAll('.pl-del').forEach(b => {
-    b.addEventListener('click', () => plRemoveLocal(Number(b.dataset.del)));
+    b.addEventListener('click', () => {
+      if (b.dataset.ldel !== undefined) {
+        state.localQueue.splice(Number(b.dataset.ldel), 1);
+        renderPlaylistSheet();
+        return;
+      }
+      plRemoveLocal(Number(b.dataset.del));
+    });
   });
   const clr = $('#pl-clear');
   if (clr) clr.addEventListener('click', () => plClearLocal());
@@ -2310,14 +2337,126 @@ const MEDIA_EXT_RE = /\.(mp4|webm|ogv|ogg|mov|m4v|mkv|m3u8|mpd)(?:[?#]|$)/i;
 
 function classifyUrl(url) {
   if (parseYouTube(url)) return 'yt';
+  if (parseYouTubePlaylist(url)) return 'ytlist';   // …?list=PL… → expand the list
   if (MEDIA_EXT_RE.test(url)) return 'file';
   return 'page';
+}
+
+/* ---------- YouTube playlists ----------
+   A playlist link carries only a list id, so there is no single video to play.
+   We read the public playlist page (it ships the first ~100 entries) and fall
+   back to the playlist RSS feed, then offer every video as a queueable item. */
+function parseYouTubePlaylist(url) {
+  if (!url) return null;
+  let u;
+  try { u = new URL(url); } catch (e) { return null; }
+  if (!/(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i.test(u.hostname)) return null;
+  const id = u.searchParams.get('list') || '';
+  return /^[A-Za-z0-9_-]{10,60}$/.test(id) ? id : null;
+}
+
+const ytWatchUrl = id => 'https://www.youtube.com/watch?v=' + id;
+
+function ytUnescape(s) {
+  return String(s || '')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\"/g, '"').replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ').trim();
+}
+
+function ytAddItem(out, seen, id, title) {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id) || seen.has(id) || out.length >= MAX_PLAYLIST) return;
+  seen.add(id);
+  out.push({ url: ytWatchUrl(id), name: ytUnescape(title).slice(0, MAX_MEDIA_NAME) || 'YouTube video' });
+}
+
+function extractYouTubePlaylist(html) {
+  const out = [];
+  const seen = new Set();
+  // classic playlist markup: {"videoId":"ID", … ,"title":{"runs":[{"text":"TITLE"
+  const re = /"playlistVideoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"[\s\S]{0,2000}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.)*)"/g;
+  let m;
+  while ((m = re.exec(html)) && out.length < MAX_PLAYLIST) ytAddItem(out, seen, m[1], m[2]);
+  if (out.length) return out;
+
+  // 2025+ markup: one lockupViewModel block per row (contentId + metadata title)
+  const blocks = html.split('"lockupViewModel":{').slice(1);
+  for (const block of blocks) {
+    const idm = /"contentId":"([A-Za-z0-9_-]{11})"/.exec(block) ||
+                /i\.ytimg\.com\/vi\/([A-Za-z0-9_-]{11})\//.exec(block);
+    if (!idm) continue;
+    const tm = /"lockupMetadataViewModel":\{"title":\{"content":"((?:[^"\\]|\\.)*)"/.exec(block);
+    ytAddItem(out, seen, idm[1], tm ? tm[1] : '');
+    if (out.length >= MAX_PLAYLIST) break;
+  }
+  if (out.length) return out;
+
+  // last resort: ids only, no titles
+  const idRe = /"(?:videoId|contentId)":"([A-Za-z0-9_-]{11})"/g;
+  while ((m = idRe.exec(html)) && out.length < MAX_PLAYLIST) ytAddItem(out, seen, m[1], '');
+  return out;
+}
+
+function extractYouTubeJina(md) {
+  const out = [];
+  const seen = new Set();
+  // "### [Video title](https://www.youtube.com/watch?v=ID&list=…&index=1)"
+  const re = /###\s*\[([^\]]+)\]\(https?:\/\/(?:www\.|m\.)?youtube\.com\/watch\?v=([A-Za-z0-9_-]{11})/g;
+  let m;
+  while ((m = re.exec(md)) && out.length < MAX_PLAYLIST) ytAddItem(out, seen, m[2], m[1]);
+  return out;
+}
+
+/* r.jina.ai renders the playlist page to markdown *and* sends CORS headers,
+   which is the only reader that survives YouTube's huge HTML. */
+async function fetchYouTubeMarkdown(url) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    const res = await fetch('https://r.jina.ai/' + url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text && text.length > 100 ? text : null;
+  } catch (e) { return null; }
+}
+
+function extractYouTubeFeed(xml) {
+  const out = [];
+  const seen = new Set();
+  const re = /<yt:videoId>\s*([A-Za-z0-9_-]{11})\s*<\/yt:videoId>[\s\S]*?<media:title>([\s\S]*?)<\/media:title>/g;
+  let m;
+  while ((m = re.exec(xml)) && out.length < MAX_PLAYLIST) ytAddItem(out, seen, m[1], m[2]);
+  return out;
+}
+
+async function fetchYouTubePlaylist(id) {
+  const enc = encodeURIComponent(id);
+  const pageUrl = 'https://www.youtube.com/playlist?list=' + enc;
+
+  // 1. reader proxy → markdown with titles, usually the first ~100 videos
+  const md = await fetchYouTubeMarkdown(pageUrl);
+  if (md) {
+    const fromMd = extractYouTubeJina(md);
+    if (fromMd.length) return fromMd;
+  }
+
+  // 2. the playlist page itself, through a CORS proxy
+  const html = await fetchPageHtml(pageUrl);
+  const fromPage = html ? extractYouTubePlaylist(html) : [];
+  if (fromPage.length) return fromPage;
+
+  // 3. playlist RSS: tiny and reliable, but only the 15 newest videos
+  const feed = await fetchPageHtml('https://www.youtube.com/feeds/videos.xml?playlist_id=' + enc);
+  return feed ? extractYouTubeFeed(feed) : [];
 }
 
 const CRAWL_PROXIES = [
   u => u,
   u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
 ];
 
 let crawling = false;
@@ -2381,13 +2520,14 @@ function extractVideos(html, pageUrl) {
   return Array.from(found).map(([url, name]) => ({ url, name })).slice(0, 20);
 }
 
-function loadDirectLink(url, kind) {
+function loadDirectLink(url, kind, name) {
   const ytId = kind === 'yt' ? parseYouTube(url) : null;
+  state.localQueue = [];   // a pasted link replaces the local file queue
   state.mediaUrl = url;
   state.localFile = null;
-  state.mediaName = String(ytId
+  state.mediaName = String(name || (ytId
     ? 'YouTube video'
-    : (url.split('/').pop().split('?')[0] || 'Shared movie')).slice(0, MAX_MEDIA_NAME);
+    : (url.split('/').pop().split('?')[0] || 'Shared movie'))).slice(0, MAX_MEDIA_NAME);
   setMedia(url, state.mediaName);
   send({ t: 'media-url', url, name: state.mediaName });
   closeSheet();
@@ -2701,17 +2841,43 @@ document.addEventListener('webkitfullscreenchange', () => {
   showControls();
 });
 $('#btn-pick').addEventListener('click', () => { haptic(8); $('#file-input').click(); });
-$('#file-input').addEventListener('change', e => {
-  const f = e.target.files && e.target.files[0];
-  if (!f) return;
-  state.localFile = f;
+
+/* Play one local file now and stream it to the partner (same as a single pick). */
+function playLocalFile(file) {
+  if (!file) return false;
+  state.localFile = file;
   state.mediaUrl = null;
+  state.mediaName = String(file.name || 'movie').slice(0, MAX_MEDIA_NAME);
   revokeBlob();
-  state.blobUrl = URL.createObjectURL(f);
-  setMedia(state.blobUrl, f.name);
-  if (state.secure) sendFile(f);
+  state.blobUrl = URL.createObjectURL(file);
+  setMedia(state.blobUrl, file.name);
+  if (state.secure) sendFile(file);
+  return true;
+}
+
+/* Several files at once → the first plays now, the rest wait in a local queue
+   and start automatically when the previous one ends (each one is streamed to
+   the partner, so you keep watching together). */
+$('#file-input').addEventListener('change', e => {
+  const files = Array.from(e.target.files || []).filter(f => f && f.size > 0);
   e.target.value = '';
+  if (!files.length) return;
+  const extra = files.slice(1, 1 + MAX_PLAYLIST);
+  state.localQueue = extra;
+  playLocalFile(files[0]);
+  if (extra.length) {
+    addSystem('📁 ' + extra.length + ' more file' + (extra.length > 1 ? 's' : '') +
+      ' queued — they play one after another');
+    toast(extra.length + ' file' + (extra.length > 1 ? 's' : '') + ' queued');
+  }
 });
+
+function playNextLocal() {
+  const next = state.localQueue.shift();
+  if (!next) return false;
+  addSystem('🎬 Next file: ' + String(next.name || 'movie').slice(0, MAX_MEDIA_NAME));
+  return playLocalFile(next);
+}
 
 /* =========================================================
    PLAYER EXTRAS - skip buttons + press-and-hold 2x speed.
@@ -2812,6 +2978,23 @@ videoWrap.addEventListener('pointercancel', e => {
   }
 });
 
+/* ----- double tap left / right side = ∓10s ----- */
+const DOUBLE_TAP_MS = 300;
+let lastTap = null;                 // { side: 'left' | 'right', at: ms }
+
+function showSkipPill(sec, side) {
+  const pill = $('#skip-pill');
+  if (!pill) return;
+  pill.textContent = (sec < 0 ? '⏪ −' : '⏩ +') + Math.abs(sec) + 's';
+  pill.classList.toggle('left', side === 'left');
+  pill.classList.toggle('right', side === 'right');
+  pill.classList.remove('show');
+  void pill.offsetWidth;            // restart the fade when tapping again
+  pill.classList.add('show');
+  clearTimeout(showSkipPill.timer);
+  showSkipPill.timer = setTimeout(() => pill.classList.remove('show'), 620);
+}
+
 /* tap video to show controls, then auto-hide */
 let idleTimer;
 function showControls(autoHide = true) {
@@ -2828,9 +3011,26 @@ function toggleControls() {
   else hideControls();
 }
 videoWrap.addEventListener('click', e => {
-  if (e.target.closest('.controls') || e.target.closest('.empty-stage') || e.target.closest('.tap-play')) return;
+  if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
+      e.target.closest('.tap-play') || e.target.closest('.transfer')) return;
   if (!state.mediaLoaded) return;
   if (Date.now() < holdSwallowUntil) return;   // released from a 2x hold, not a tap
+
+  const r = videoWrap.getBoundingClientRect();
+  const ratio = r.width ? (e.clientX - r.left) / r.width : 0.5;
+  const side = ratio < 0.33 ? 'left' : ratio > 0.67 ? 'right' : null;
+  const now = Date.now();
+
+  // double tap on the same side = jump 10s (single tap keeps toggling controls)
+  if (side && lastTap && lastTap.side === side && now - lastTap.at < DOUBLE_TAP_MS) {
+    lastTap = null;
+    const sec = side === 'left' ? -10 : 10;
+    showSkipPill(sec, side);
+    skipLocal(sec);          // haptics + shows controls + the seek syncs the partner
+    return;
+  }
+
+  lastTap = side ? { side, at: now } : null;
   toggleControls();
 });
 $('#controls').addEventListener('pointerdown', () => showControls());
@@ -3254,7 +3454,7 @@ function openLinkSheet() {
   haptic(8);
   openSheet(`
     <h3>Paste a movie link</h3>
-    <p>YouTube and direct video files (.mp4 / .webm / .m3u8…) play straight away. Paste any <b>page</b> link and Reel looks through it for videos.</p>
+    <p>YouTube videos, YouTube <b>playlists</b> and direct video files (.mp4 / .webm / .m3u8…) all work. Paste any <b>page</b> link and Reel looks through it for videos.</p>
     <input type="url" id="url-input" placeholder="https://youtube.com/watch?v=…" autocomplete="off" maxlength="2048">
     <button class="btn" id="url-go">Find video</button>
     <div id="crawl-out"></div>
@@ -3270,6 +3470,7 @@ function onUrlGo() {
   const url = safeMediaUrl(raw);
   if (!url) { toast('Enter a valid http(s) link'); return; }
   const kind = classifyUrl(url);
+  if (kind === 'ytlist') { expandYouTubePlaylist(url); return; }
   if (kind !== 'page') { loadDirectLink(url, kind); return; }
   crawlPageLink(url);
 }
@@ -3295,8 +3496,16 @@ async function crawlPageLink(url) {
     out.innerHTML = '<div class="crawl-status">No video files found on that page.</div>';
     return;
   }
+  renderCrawlResults(vids);
+}
+
+/* Same result list for crawled pages and YouTube playlists: play one now,
+   queue one, or queue the whole list. */
+function renderCrawlResults(vids, label) {
+  const out = $('#crawl-out');
+  if (!out || !out.isConnected) return;
   out.innerHTML = `
-    <div class="crawl-status">Found ${vids.length} video${vids.length > 1 ? 's' : ''}</div>
+    <div class="crawl-status">Found ${vids.length} video${vids.length > 1 ? 's' : ''}${label ? ' in this ' + label : ''}</div>
     <div class="crawl-list">${vids.map((v, i) => `
       <div class="crawl-item">
         <div class="crawl-name" title="${escHtml(v.url)}">${escHtml(v.name)}</div>
@@ -3307,7 +3516,8 @@ async function crawlPageLink(url) {
 
   const found = vids;
   out.querySelectorAll('.crawl-play').forEach(b => b.addEventListener('click', () => {
-    loadDirectLink(found[Number(b.dataset.play)].url, 'file');
+    const i = Number(b.dataset.play);
+    loadDirectLink(found[i].url, classifyUrl(found[i].url), found[i].name);
   }));
   out.querySelectorAll('.crawl-add').forEach(b => b.addEventListener('click', () => {
     if (plAddLocal([found[Number(b.dataset.add)]])) {
@@ -3319,6 +3529,28 @@ async function crawlPageLink(url) {
   if (all) all.addEventListener('click', () => {
     if (plAddLocal(found)) { closeSheet(); setTimeout(openPlaylistSheet, 200); }
   });
+}
+
+/* ----- YouTube playlist link → every video in it ----- */
+async function expandYouTubePlaylist(url) {
+  if (crawling) { toast('Still reading the previous page…'); return; }
+  const id = parseYouTubePlaylist(url);
+  if (!id) return;
+  crawling = true;
+  const out = $('#crawl-out');
+  const go = $('#url-go');
+  if (!out || !go) { crawling = false; return; }
+  go.disabled = true;
+  out.innerHTML = '<div class="crawl-status">🎬 Reading the playlist…</div>';
+  const vids = (await fetchYouTubePlaylist(id)).slice(0, MAX_PLAYLIST);
+  crawling = false;
+  go.disabled = false;
+  if (!out.isConnected) return;
+  if (!vids.length) {
+    out.innerHTML = '<div class="crawl-status">Could not read that playlist — it may be private or the reader is blocked. Try pasting the video links one by one.</div>';
+    return;
+  }
+  renderCrawlResults(vids, 'playlist');
 }
 $('#btn-link').addEventListener('click', openLinkSheet);
 
