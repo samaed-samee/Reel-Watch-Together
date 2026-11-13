@@ -3408,8 +3408,8 @@ $('#btn-menu').addEventListener('click', () => {
       : 'Waiting for an encrypted connection…'}</p>
     <div class="sheet-menu">
       <button class="btn ghost" id="m-change">Change movie</button>
-      <button class="btn ghost" id="m-plist">📋 Playlist${state.playlist.length ? ' (' + state.playlist.length + ')' : ''}</button>
-      ${fsOk ? `<button class="btn ghost" id="m-fs">${fsOn ? '🗗 Exit fullscreen' : '🖥️ Fullscreen'}</button>` : ''}
+      <button class="btn ghost" id="m-plist">Playlist${state.playlist.length ? ' (' + state.playlist.length + ')' : ''}</button>
+      ${fsOk ? `<button class="btn ghost" id="m-fs">${fsOn ? 'Exit fullscreen' : 'Fullscreen'}</button>` : ''}
       <button class="btn ghost" id="m-share">Share invite</button>
       <button class="btn dark" id="m-leave">Leave room</button>
     </div>

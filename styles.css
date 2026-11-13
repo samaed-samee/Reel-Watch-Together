@@ -104,6 +104,11 @@ input,textarea{user-select:text;-webkit-user-select:text;font-family:inherit}
 .splash-title{
   font-family:'Caveat',cursive;font-size:52px;font-weight:700;line-height:1;
   letter-spacing:.5px;animation:riseIn .7s var(--ease) both .1s;
+  /* Caveat's glyphs sit ~6px right of their layout box (asymmetric bearings
+     plus the trailing letter-space), so the centred title looked shifted to
+     the right under the reel icon. Pull the ink back onto the icon's centre.
+     Uses left, not transform, so the riseIn animation stays intact. */
+  position:relative;left:-6px;
 }
 .splash-sub{font-size:13px;color:var(--muted);letter-spacing:2.6px;text-transform:uppercase;font-weight:600;animation:riseIn .7s var(--ease) both .25s}
 @keyframes riseIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
