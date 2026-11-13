@@ -318,6 +318,18 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   transition:box-shadow .25s;
 }
 #video{width:100%;height:100%;object-fit:contain;display:block;background:#141210}
+/* Sits right above the <video> but below every overlay (they come later in the
+   DOM), so it swallows the native long-press menu without hiding the controls. */
+.video-hit{
+  position:absolute;inset:0;background:transparent;
+  -webkit-touch-callout:none;user-select:none;-webkit-user-select:none;
+}
+.video-wrap.is-yt .video-hit,
+.video-wrap:not(.has-media) .video-hit{display:none}
+/* no text callout / selection anywhere on the player */
+.video-wrap,#video{
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
+}
 .yt-stage{position:absolute;inset:0;display:none;background:#000}
 .yt-stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 .video-wrap.is-yt #video{display:none}

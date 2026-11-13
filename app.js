@@ -2928,6 +2928,7 @@ let holdActive = false;
 let holdPointer = null;
 let holdStart = null;
 let holdSwallowUntil = 0;
+let tapStart = null;             // { id, x, y, at } of the current press
 
 function holdCancel() {
   if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
@@ -2935,12 +2936,22 @@ function holdCancel() {
   holdStart = null;
 }
 
+/* A long press on a <video> makes mobile browsers offer their own menu
+   ("Download video", "Copy video frame"…). The .video-hit layer already keeps
+   the press off the media element; this is the belt-and-braces for browsers
+   that still fire it on the wrapper. */
+videoWrap.addEventListener('contextmenu', e => e.preventDefault());
+
 videoWrap.addEventListener('pointerdown', e => {
   if (holdPointer !== null || holdActive) return;
   if (!state.mediaLoaded || state.isYT || scrubbing) return;
   if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
       e.target.closest('.tap-play') || e.target.closest('.transfer') ||
       e.target.closest('.fs-exit')) return;
+
+  // remember the press so pointerup can tell a tap from a hold / drag
+  tapStart = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now() };
+
   const r = videoWrap.getBoundingClientRect();
   if (!r.width) return;
   if ((e.clientX - r.left) / r.width < 0.5) return;    // right half only
@@ -2959,27 +2970,45 @@ videoWrap.addEventListener('pointermove', e => {
       Math.hypot(e.clientX - holdStart.x, e.clientY - holdStart.y) > 40) holdCancel();
 });
 videoWrap.addEventListener('pointerup', e => {
-  if (e.pointerId !== holdPointer) return;
   const wasHold = holdActive;
-  holdCancel();
-  if (wasHold) {
-    holdActive = false;
-    setRate(1, true);
-    holdSwallowUntil = Date.now() + 400;   // the release click must not toggle controls
+  if (e.pointerId === holdPointer) {
+    holdCancel();
+    if (wasHold) {
+      holdActive = false;
+      setRate(1, true);
+      holdSwallowUntil = Date.now() + 400;   // the release must not count as a tap
+    }
   }
+  handleTapEnd(e, wasHold);
 });
 videoWrap.addEventListener('pointercancel', e => {
-  if (e.pointerId !== holdPointer) return;
+  tapStart = null;
   const wasHold = holdActive;
-  holdCancel();
+  if (e.pointerId === holdPointer) holdCancel();
   if (wasHold) {
     holdActive = false;
     setRate(1, true);
   }
 });
 
+/* ----- tap handling -----
+   Taps are detected on pointerup, not on click: mobile browsers delay or skip
+   the synthetic click (and a double tap can be swallowed as a zoom gesture),
+   which is why double tap did nothing on phones. Pointer events fire for
+   touch, pen and mouse alike, immediately. */
+function handleTapEnd(e, wasHold) {
+  const t = tapStart;
+  tapStart = null;
+  if (!t || t.id !== e.pointerId) return;
+  if (wasHold || !state.mediaLoaded) return;
+  if (Date.now() < holdSwallowUntil) return;                     // after a 2× hold
+  if (Date.now() - t.at > 450) return;                           // long press
+  if (Math.hypot(e.clientX - t.x, e.clientY - t.y) > 14) return; // dragged
+  handleVideoTap(e.clientX, e.clientY);
+}
+
 /* ----- double tap left / right side = ∓10s ----- */
-const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_MS = 350;
 let lastTap = null;                 // { side: 'left' | 'right', at: ms }
 
 function showSkipPill(sec, side) {
@@ -2993,6 +3022,25 @@ function showSkipPill(sec, side) {
   pill.classList.add('show');
   clearTimeout(showSkipPill.timer);
   showSkipPill.timer = setTimeout(() => pill.classList.remove('show'), 620);
+}
+
+function handleVideoTap(x, y) {
+  const r = videoWrap.getBoundingClientRect();
+  const ratio = r.width ? (x - r.left) / r.width : 0.5;
+  const side = ratio < 0.33 ? 'left' : ratio > 0.67 ? 'right' : null;
+  const now = Date.now();
+
+  // double tap on the same side = jump 10s (single tap keeps toggling controls)
+  if (side && lastTap && lastTap.side === side && now - lastTap.at < DOUBLE_TAP_MS) {
+    lastTap = null;
+    const sec = side === 'left' ? -10 : 10;
+    showSkipPill(sec, side);
+    skipLocal(sec);          // haptics + shows controls + the seek syncs the partner
+    return;
+  }
+
+  lastTap = side ? { side, at: now } : null;
+  toggleControls();
 }
 
 /* tap video to show controls, then auto-hide */
@@ -3010,29 +3058,6 @@ function toggleControls() {
   if (videoWrap.classList.contains('idle')) showControls();
   else hideControls();
 }
-videoWrap.addEventListener('click', e => {
-  if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
-      e.target.closest('.tap-play') || e.target.closest('.transfer')) return;
-  if (!state.mediaLoaded) return;
-  if (Date.now() < holdSwallowUntil) return;   // released from a 2x hold, not a tap
-
-  const r = videoWrap.getBoundingClientRect();
-  const ratio = r.width ? (e.clientX - r.left) / r.width : 0.5;
-  const side = ratio < 0.33 ? 'left' : ratio > 0.67 ? 'right' : null;
-  const now = Date.now();
-
-  // double tap on the same side = jump 10s (single tap keeps toggling controls)
-  if (side && lastTap && lastTap.side === side && now - lastTap.at < DOUBLE_TAP_MS) {
-    lastTap = null;
-    const sec = side === 'left' ? -10 : 10;
-    showSkipPill(sec, side);
-    skipLocal(sec);          // haptics + shows controls + the seek syncs the partner
-    return;
-  }
-
-  lastTap = side ? { side, at: now } : null;
-  toggleControls();
-});
 $('#controls').addEventListener('pointerdown', () => showControls());
 
 /* =========================================================

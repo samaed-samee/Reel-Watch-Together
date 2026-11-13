@@ -114,7 +114,11 @@
 
     <div class="stage">
       <div class="video-wrap" id="video-wrap">
-        <video id="video" playsinline webkit-playsinline preload="metadata"></video>
+        <video id="video" playsinline webkit-playsinline preload="metadata" controlslist="nodownload noplaybackrate" disablepictureinpicture></video>
+        <!-- transparent tap layer: a long press on the <video> element itself makes
+             Chrome offer "Download video / Copy video frame"; pressing this div
+             instead keeps the native menu away while taps still reach the app -->
+        <div class="video-hit" id="video-hit" aria-hidden="true"></div>
         <div class="yt-stage" id="yt-stage"></div>
 
         <div class="empty-stage" id="empty-stage">

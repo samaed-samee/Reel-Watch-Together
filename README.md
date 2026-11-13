@@ -117,6 +117,10 @@ How the page reading works, honestly:
 | **Double tap the left third** | −10 seconds, synced (a `⏪ −10s` pill flashes). |
 | **Press and hold the right half** | 2× speed while held, then back to 1× — synced. |
 | `-10s` / `+10s` buttons | Same jumps from the control bar. |
+| Long press anywhere | No browser menu — *Download video* / *Copy video frame* never appear (a transparent tap layer sits over the `<video>`, and `contextmenu` is cancelled). |
+| Several files at once | The file picker takes a whole selection; the rest queue as *Next from this device*. |
+
+Gestures are handled on **pointer events** (`pointerdown` / `pointerup`), not `click`, because mobile browsers delay or swallow the synthetic click of a quick double tap. That is why the double tap works on a phone as well as with a mouse.
 
 ### Several files at once
 
