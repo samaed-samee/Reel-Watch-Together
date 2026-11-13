@@ -275,9 +275,11 @@ function destroyYouTube() {
   ytStage.innerHTML = '';
   videoWrap.classList.remove('is-yt');
   destroyHls();
+  setRate(1, false);
 }
 
 async function loadYouTube(id, name) {
+  setRate(1, false);
   state.isYT = true;
   state.ytId = id;
   state.mediaLoaded = true;
@@ -675,9 +677,37 @@ function handlePeerError(err) {
     setStatus('off', 'Reconnecting…');
     if (state.role === 'guest') scheduleGuestReconnect();
   } else if (type === 'unavailable-id') {
+    // After a signalling drop the socket re-registers, but the server may
+    // still hold the previous session → "ID is taken". The room should
+    // re-arm itself instead of kicking both people out.
+    if (state.role === 'host' && state.code) {
+      toast('Reconnecting the room…');
+      setStatus('off', 'Reconnecting…');
+      rearmHost();
+      return;
+    }
     toast('Code collision — try again');
     setTimeout(leaveRoom, 900);
   }
+}
+
+/* Re-register the host peer with the same room id after a signalling drop.
+   The guest's auto-reconnect then finds the room again. */
+async function rearmHost(attempt = 0) {
+  const code = state.code;
+  if (!code) return;
+  try {
+    await initPeer(PREFIX + code);
+  } catch (e) {
+    if (attempt < 2) {
+      setTimeout(() => rearmHost(attempt + 1), 2000);
+      return;
+    }
+    toast('Could not restore the room');
+    leaveRoom();
+    return;
+  }
+  setStatus('waiting', 'Waiting for partner…');
 }
 
 function onIncoming(conn) {
@@ -1027,6 +1057,11 @@ function onSecureMessage(data) {
       break;
 
     case 'cmd': {
+      if (data.a === 'rate') {
+        if (data.v !== 1 && data.v !== 2) break;   // whitelist: only 1x and 2x
+        applyCmd({ a: 'rate', v: data.v });
+        break;
+      }
       if (['play', 'pause', 'seek', 'tick'].indexOf(data.a) < 0) break;
       const t = Number(data.time);
       if (!Number.isFinite(t) || t < 0 || t > 7 * 24 * 3600) break;
@@ -2451,6 +2486,11 @@ function applyCmd(m) {
   state.suppressUntil = Date.now() + 450;
   const t = typeof m.time === 'number' ? m.time : 0;
 
+  if (m.a === 'rate') {
+    setRate(m.v, false);
+    return;
+  }
+
   if (state.isYT) {
     if (!ytReady) return;
     if (m.a === 'seek' || m.a === 'play' || m.a === 'tick') {
@@ -2666,6 +2706,105 @@ $('#file-input').addEventListener('change', e => {
   e.target.value = '';
 });
 
+/* =========================================================
+   PLAYER EXTRAS - skip buttons + press-and-hold 2x speed.
+   The hold gesture only applies to direct videos (the
+   YouTube iframe swallows pointer events anyway). The 2x
+   speed is synced to the partner with a `rate` command so
+   both sides speed up and return together - no drift.
+   ========================================================= */
+function setRate(v, broadcast) {
+  if (!state.mediaLoaded) return;
+  try {
+    if (state.isYT) { if (ytReady) ytPlayer.setPlaybackRate(v); }
+    else video.playbackRate = v;
+  } catch (e) {}
+  const pill = $('#speed-pill');
+  if (pill) pill.classList.toggle('show', v !== 1);
+  if (broadcast) send({ t: 'cmd', a: 'rate', v });
+}
+
+/* ----- fast forward / rewind (±10s) ----- */
+function skipLocal(sec) {
+  if (!state.mediaLoaded || scrubbing) return;
+  haptic(8);
+  showControls();
+  if (state.isYT) {
+    if (!ytReady) return;
+    const d = ytPlayer.getDuration() || 0;
+    const t = Math.max(0, Math.min((ytPlayer.getCurrentTime() || 0) + sec, d || Infinity));
+    try { ytPlayer.seekTo(t, true); } catch (e) {}
+    state.suppressUntil = Date.now() + 300;
+    paintScrub();
+    send({ t: 'cmd', a: 'seek', time: t });
+    return;
+  }
+  if (video.readyState < 1) return;
+  let t = video.currentTime + sec;
+  if (Number.isFinite(video.duration)) t = Math.min(t, video.duration);
+  if (t < 0) t = 0;
+  try { video.currentTime = t; } catch (e) {}   // `seeked` event syncs the partner
+}
+$('#btn-rw').addEventListener('click', () => skipLocal(-10));
+$('#btn-ff').addEventListener('click', () => skipLocal(10));
+
+/* ----- press & hold the right side of the video = 2x speed ----- */
+const HOLD_MS = 380;
+let holdTimer = null;
+let holdActive = false;
+let holdPointer = null;
+let holdStart = null;
+let holdSwallowUntil = 0;
+
+function holdCancel() {
+  if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  holdPointer = null;
+  holdStart = null;
+}
+
+videoWrap.addEventListener('pointerdown', e => {
+  if (holdPointer !== null || holdActive) return;
+  if (!state.mediaLoaded || state.isYT || scrubbing) return;
+  if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
+      e.target.closest('.tap-play') || e.target.closest('.transfer') ||
+      e.target.closest('.fs-exit')) return;
+  const r = videoWrap.getBoundingClientRect();
+  if (!r.width) return;
+  if ((e.clientX - r.left) / r.width < 0.5) return;    // right half only
+  holdPointer = e.pointerId;
+  holdStart = { x: e.clientX, y: e.clientY };
+  holdTimer = setTimeout(() => {
+    holdTimer = null;
+    holdActive = true;
+    haptic(12);
+    setRate(2, true);
+  }, HOLD_MS);
+});
+videoWrap.addEventListener('pointermove', e => {
+  // a big move means the user is scrolling / dragging, not holding
+  if (holdTimer && holdStart &&
+      Math.hypot(e.clientX - holdStart.x, e.clientY - holdStart.y) > 40) holdCancel();
+});
+videoWrap.addEventListener('pointerup', e => {
+  if (e.pointerId !== holdPointer) return;
+  const wasHold = holdActive;
+  holdCancel();
+  if (wasHold) {
+    holdActive = false;
+    setRate(1, true);
+    holdSwallowUntil = Date.now() + 400;   // the release click must not toggle controls
+  }
+});
+videoWrap.addEventListener('pointercancel', e => {
+  if (e.pointerId !== holdPointer) return;
+  const wasHold = holdActive;
+  holdCancel();
+  if (wasHold) {
+    holdActive = false;
+    setRate(1, true);
+  }
+});
+
 /* tap video to show controls, then auto-hide */
 let idleTimer;
 function showControls(autoHide = true) {
@@ -2684,6 +2823,7 @@ function toggleControls() {
 videoWrap.addEventListener('click', e => {
   if (e.target.closest('.controls') || e.target.closest('.empty-stage') || e.target.closest('.tap-play')) return;
   if (!state.mediaLoaded) return;
+  if (Date.now() < holdSwallowUntil) return;   // released from a 2x hold, not a tap
   toggleControls();
 });
 $('#controls').addEventListener('pointerdown', () => showControls());

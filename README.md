@@ -30,6 +30,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 |---|---|
 | 🎥 **Watch in sync** | Play, pause and seek stay locked together. The host is the playback clock. |
 | ▶️ **YouTube + links** | Paste a YouTube URL, any direct `.mp4` / `.webm` / `.m3u8` link — or any **web page** link: Reel reads the page and finds the videos on it. |
+| ⏩ **Skip & 2× speed** | −10s / +10s buttons next to play, and press-and-hold the right side of the video for 2× speed — the speed-up is synced so both people stay together. |
 | 📋 **Playlist** | Queue up to 50 videos in any mix of YouTube / links / HLS streams. Both people add, remove and skip; videos auto-play one after another. |
 | 📁 **Send a local file** | Pick a movie from your device; it is streamed to your partner over WebRTC. |
 | 💬 **Chat** | Typing indicators, replies, delivery/read ticks, emoji bursts and swipe-to-reply. |
@@ -232,7 +233,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 Reel - watch together/
 ├─ index.html      markup + CSP + meta (no inline scripts)
 ├─ styles.css      all styling (paper theme, chat, player, sheets)
-├─ app.js          all application logic (sync, chat, voice, E2E crypto, PWA banner, link finder, playlist)
+├─ app.js          all application logic (sync, chat, voice, E2E crypto, PWA banner, link finder, playlist, player gestures)
 ├─ boot.js         tiny Android safe-area bootstrap (runs before CSS)
 ├─ manifest.json   PWA manifest (name, icon sizes, standalone display)
 ├─ sw.js           service worker (offline app shell, versioned cache)

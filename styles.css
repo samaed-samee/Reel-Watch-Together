@@ -383,6 +383,8 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .ctrl-btn svg{width:16px;height:16px;fill:#fff}
 .ctrl-btn svg[stroke]{fill:none}
 .ctrl-btn.ghosty{background:transparent;border-color:transparent}
+.ctrl-btn.sm{width:28px;height:28px}
+.ctrl-btn.sm svg{width:14px;height:14px}
 .time{font-size:10.5px;color:rgba(255,255,255,.85);font-variant-numeric:tabular-nums;font-weight:600;flex:0 0 auto;min-width:32px;text-align:center}
 
 .scrub{position:relative;flex:1 1 auto;height:26px;display:flex;align-items:center;touch-action:none;cursor:pointer}
@@ -395,6 +397,20 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   pointer-events:none;
 }
 .scrub:active .scrub-knob{transform:translateY(-50%) scale(1.25)}
+
+/* --- 2x speed pill (press & hold right side of the video) --- */
+.speed-pill{
+  position:absolute;top:14px;right:14px;z-index:26;
+  display:flex;align-items:center;gap:6px;
+  padding:7px 13px;border-radius:999px;
+  background:rgba(27,24,21,.8);color:#fff;
+  font-size:12px;font-weight:700;letter-spacing:.4px;
+  opacity:0;transform:translateY(-8px) scale(.9);
+  pointer-events:none;
+  transition:opacity .18s ease, transform .22s var(--spring);
+}
+.speed-pill.show{opacity:1;transform:none}
+.speed-pill svg{width:13px;height:13px}
 
 /* --- transfer --- */
 .transfer{

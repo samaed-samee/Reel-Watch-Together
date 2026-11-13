@@ -5,7 +5,7 @@
    Bump VERSION whenever you ship changed app files, or the old
    shell keeps coming back from the cache.
    ========================================================= */
-const VERSION = 'reel-shell-v2';
+const VERSION = 'reel-shell-v3';
 const SHELL = [
   './',
   './index.html',
@@ -37,6 +37,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (url.origin !== location.origin) return; // CDN / YouTube / WebRTC traffic passes straight through
+  if (e.request.headers.has('range')) return; // media streaming: let <video> talk to the network directly
 
   // Page navigations: network first so updates land quickly,
   // cached shell as the offline fallback.

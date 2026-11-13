@@ -129,10 +129,21 @@
 
         <div class="tap-play" id="tap-play"><span><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></div>
 
+        <div class="speed-pill" id="speed-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 6l6 6-6 6"/><path d="M5 6l6 6-6 6"/></svg>
+          2× speed
+        </div>
+
         <div class="controls" id="controls">
           <div class="ctrl-row">
+            <button class="ctrl-btn ghosty sm" id="btn-rw" aria-label="Back 10 seconds">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5"/><path d="M18 17l-5-5 5-5"/></svg>
+            </button>
             <button class="ctrl-btn" id="btn-play">
               <svg id="ic-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button class="ctrl-btn ghosty sm" id="btn-ff" aria-label="Forward 10 seconds">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 7l5 5-5 5"/><path d="M6 7l5 5-5 5"/></svg>
             </button>
             <span class="time" id="time-cur">0:00</span>
             <div class="scrub" id="scrub">
