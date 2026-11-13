@@ -3636,24 +3636,52 @@ window.addEventListener('resize', () => {
 
 /* ---------- mobile keyboard handling ----------
    The app keeps its full size when the keyboard opens — nothing shrinks
-   or jumps. We only measure how much the keyboard covers and float the
-   composer right above it (see body.kb-open rules in the CSS). */
+   or jumps. We measure how much the keyboard covers and float the composer
+   right above it (see body.kb-open rules in the CSS).
+
+   Mobile browsers also *pan* the visual viewport to reveal the focused
+   field (visualViewport.offsetTop). The whole app is position:fixed in the
+   layout viewport, so that pan used to drag the header and the video off
+   the top of the screen. The pan is now published as --vv-top and the app
+   re-anchors to the visible band, so only the composer moves. */
 const vv = window.visualViewport;
+
+/* isolated so the maths can be checked without a real keyboard */
+function readViewport() {
+  const innerH = window.innerHeight || 0;
+  return {
+    innerH,
+    vvH: vv ? vv.height : innerH,
+    vvTop: vv ? vv.offsetTop : 0
+  };
+}
 
 function syncViewport() {
   if (!vv) return;
-  const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+  const { innerH, vvH, vvTop } = readViewport();
+  const covered = Math.max(0, innerH - vvH - vvTop);
   const kbOpen = covered > 120;
 
   document.body.classList.toggle('kb-open', kbOpen);
   document.documentElement.style.setProperty('--kb', kbOpen ? Math.round(covered) + 'px' : '0px');
+  // follow the pan only while the keyboard is up — normal scrolling must not move the app
+  document.documentElement.style.setProperty(
+    '--vv-top', kbOpen && vvTop > 0 ? Math.round(vvTop) + 'px' : '0px'
+  );
 
   if (kbOpen) scrollChat(true);
 }
 
+/* coalesce the burst of events fired while the keyboard slides in/out */
+let vvFrame = 0;
+function queueViewport() {
+  if (vvFrame) return;
+  vvFrame = requestAnimationFrame(() => { vvFrame = 0; syncViewport(); });
+}
+
 if (vv) {
-  vv.addEventListener('resize', syncViewport);
-  vv.addEventListener('scroll', syncViewport);
+  vv.addEventListener('resize', queueViewport);
+  vv.addEventListener('scroll', queueViewport);
 }
 window.addEventListener('orientationchange', () => setTimeout(syncViewport, 300));
 
