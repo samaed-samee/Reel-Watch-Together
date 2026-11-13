@@ -271,7 +271,7 @@ The two sides could not prove the same shared secret. This is the fail-closed pa
 Rooms hold exactly two people. Someone else already took the guest seat; create a new room.
 
 **Voice button says "Wait for the encrypted connection…"**
-Voice is only available after the E2E handshake completes and both people are online. If it stays stuck, see the handshake entry above. You can also start the call from **Room options → Start voice call**.
+Voice is only available after the E2E handshake completes and both people are online. If it stays stuck, see the handshake entry above. The call is started from the microphone button in the header.
 
 **No microphone prompt / "Microphone permission is needed"**
 Grant microphone access in the browser's site settings, then reload. Browsers only expose the microphone on `https://` or `http://localhost`; opening the page from `file://` will not work.

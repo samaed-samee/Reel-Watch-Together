@@ -3346,29 +3346,18 @@ $('#btn-menu').addEventListener('click', () => {
       ? '🔒 Safety code <b style="letter-spacing:1.5px">' + state.sas.slice(0, 3) + ' ' + state.sas.slice(3) + '</b> — compare it with your partner.'
       : 'Waiting for an encrypted connection…'}</p>
     <div class="sheet-menu">
-      <button class="btn ghost" id="m-voice">${voice.status === 'idle' ? '🎙️ Start voice call' : '🎙️ End voice call'}</button>
       <button class="btn ghost" id="m-change">Change movie</button>
       <button class="btn ghost" id="m-plist">📋 Playlist${state.playlist.length ? ' (' + state.playlist.length + ')' : ''}</button>
-      <button class="btn ghost" id="m-copy">Copy room code</button>
       <button class="btn ghost" id="m-share">Share invite</button>
       <button class="btn dark" id="m-leave">Leave room</button>
     </div>
   `);
 
-  $('#m-voice').addEventListener('click', () => {
-    closeSheet();
-    if (voice.status === 'idle') startVoiceInvite();
-    else closeVoice(true, 'Voice call ended');
-  });
   $('#m-change').addEventListener('click', () => {
     closeSheet();
     setTimeout(openMediaChooser, 160);
   });
   $('#m-plist').addEventListener('click', openPlaylistSheet);
-  $('#m-copy').addEventListener('click', () => {
-    copyCode();
-    closeSheet();
-  });
   $('#m-share').addEventListener('click', async () => {
     const text = `Watch a movie with me on Reel 🎬\nRoom code: ${formatCode(state.code)}`;
     if (navigator.share) {
