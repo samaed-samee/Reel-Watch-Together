@@ -607,6 +607,56 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .sheet .btn{width:100%}
 .sheet-menu{display:flex;flex-direction:column;gap:10px}
 
+/* --- playlist sheet --- */
+.pl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:46vh;overflow-y:auto}
+.pl-row{
+  display:flex;align-items:center;gap:10px;
+  background:var(--card);border:2px solid var(--paper-2);border-radius:12px 4px 12px 4px/4px 12px 4px 12px;
+  padding:10px 12px;cursor:pointer;transition:border-color .18s ease, transform .18s var(--spring);
+}
+.pl-row:active{transform:scale(.98)}
+.pl-row.now{border-color:var(--accent)}
+.pl-num{
+  flex:0 0 26px;height:26px;border-radius:50%;
+  display:grid;place-items:center;
+  font-size:11px;font-weight:700;color:var(--muted);
+  background:var(--paper-2);
+}
+.pl-row.now .pl-num{background:var(--accent);color:#fff}
+.pl-name{
+  flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.pl-row.now .pl-name{color:var(--accent)}
+.pl-del{
+  flex:0 0 auto;border:none;background:transparent;color:var(--muted);
+  font-size:14px;cursor:pointer;padding:6px 8px;
+}
+.pl-del:active{transform:scale(.85)}
+
+/* --- link finder results --- */
+.crawl-status{font-size:13px;color:var(--ink-2);margin:2px 0 10px;font-weight:500}
+.crawl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:40vh;overflow-y:auto}
+.crawl-item{
+  display:flex;align-items:center;gap:8px;
+  background:var(--card);border:2px solid var(--paper-2);border-radius:12px 4px 12px 4px/4px 12px 4px 12px;
+  padding:9px 12px;
+}
+.crawl-name{
+  flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.crawl-play,.crawl-add{
+  flex:0 0 auto;border:none;cursor:pointer;font-family:inherit;
+  font-size:12px;font-weight:700;padding:7px 12px;border-radius:999px;
+  transition:transform .18s var(--spring);
+}
+.crawl-play{background:var(--accent);color:#fff}
+.crawl-add{background:var(--paper-2);color:var(--ink)}
+.crawl-add:disabled{opacity:.55;cursor:default}
+.crawl-play:active,.crawl-add:active{transform:scale(.92)}
+#crawl-all{margin-top:2px}
+
 /* --- confirm dialog --- */
 .dialog-backdrop{
   position:fixed;inset:0;z-index:9700;padding:24px;

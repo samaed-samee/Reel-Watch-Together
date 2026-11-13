@@ -12,6 +12,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Install as an app (PWA)](#install-as-an-app-pwa)
+- [Link finder & playlist](#link-finder--playlist)
 - [How it works](#how-it-works)
 - [Security model](#security-model)
 - [Limits & rate limits](#limits--rate-limits)
@@ -28,7 +29,8 @@ Everything that travels between the two devices — chat, reactions, playback co
 | | |
 |---|---|
 | 🎥 **Watch in sync** | Play, pause and seek stay locked together. The host is the playback clock. |
-| ▶️ **YouTube + links** | Paste a YouTube URL or any direct `.mp4` / `.webm` / `.m3u8` link. |
+| ▶️ **YouTube + links** | Paste a YouTube URL, any direct `.mp4` / `.webm` / `.m3u8` link — or any **web page** link: Reel reads the page and finds the videos on it. |
+| 📋 **Playlist** | Queue up to 50 videos in any mix of YouTube / links / HLS streams. Both people add, remove and skip; videos auto-play one after another. |
 | 📁 **Send a local file** | Pick a movie from your device; it is streamed to your partner over WebRTC. |
 | 💬 **Chat** | Typing indicators, replies, delivery/read ticks, emoji bursts and swipe-to-reply. |
 | 🎙️ **Live voice** | Encrypted peer-to-peer voice with one-tap mute, speaking glow and a live waveform. |
@@ -82,6 +84,34 @@ Notes:
 - The service worker caches only same-origin files. PeerJS signalling, fonts and YouTube always come from the network — the app still needs internet to connect a room, the cache just removes the loading wait.
 - If you change `app.js`, `styles.css` or other app files, bump the `VERSION` constant at the top of `sw.js` (e.g. `reel-shell-v1` → `reel-shell-v2`), or visitors may keep getting the old cached files.
 - The icon files live in `icons/` and can be regenerated any time with `powershell -File icons\make-icons.ps1`.
+
+---
+
+## Link finder & playlist
+
+### Paste any page, get the videos
+
+**Paste a link** accepts three kinds of URL:
+
+| You paste | What happens |
+|---|---|
+| A YouTube link | Plays in the built-in YouTube player (unchanged). |
+| A direct video file — `.mp4` `.webm` `.ogv` `.ogg` `.mov` `.m4v` `.mkv` `.m3u8` `.mpd` | Plays directly. `.m3u8` (HLS) uses **hls.js** on browsers without native HLS (Safari plays it natively). |
+| Any other web page | Reel **reads the page** and lists every video it can find — then you pick *Play* / *+ Queue* per video, or **Add all** to queue the whole page. |
+
+How the page reading works, honestly:
+
+- Browsers cannot read another site's HTML directly (CORS). Reel first tries a plain `fetch`, and if that is blocked it falls back to public CORS proxies (`api.allorigins.win`, `corsproxy.io`). That means the page URL you crawl is seen by those third-party services, and a flaky proxy day can make crawling fail — pasting a direct video link always works as a fallback.
+- The page is scanned for `<video>` / `<source>` tags, `og:video` / `twitter:player:stream` meta tags, JSON-LD `VideoObject` entries, and `.mp4/.webm/.m3u8/...` URLs inside the page's scripts.
+- Sites that need a login or DRM (Netflix, Prime, private Instagram/TikTok) can never work — no browser-side tool can open those.
+
+### Playlist
+
+- Both people can add, remove and skip; every change syncs through the same **AES-GCM-256** encrypted channel as chat.
+- Tap an item to play it for both of you; videos advance automatically when one ends (works for normal files, HLS and YouTube).
+- The playlist button lives in the player controls (list icon) and in *Room options*.
+- Up to 50 videos, names capped at 120 characters, incoming playlist frames rate-limited like everything else.
+- On reconnect the host's playlist snapshot (`pl-sync`) restores the list on the other side.
 
 ---
 
@@ -181,6 +211,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 | Media / file name | 120 characters |
 | Shared file size | 1.5 GB |
 | File chunk size | 16 KB (29 bytes encryption overhead each) |
+| Playlist size | 50 videos (any mix of YouTube / links / HLS) |
 | Chat history kept in memory | 800 messages |
 | Handshake timeout | 15 seconds |
 | Voice invitation timeout | 30 seconds |
@@ -189,6 +220,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 | Incoming frames | 40 burst / 20 per second |
 | Incoming reactions & emoji | 6 burst / 0.5 per second |
 | Incoming file offers | 3 burst |
+| Incoming playlist frames | 16 burst / 2 per second |
 | Outgoing chat | 6 burst / 1.5 per second |
 | Outgoing emoji bursts | 4 burst / 0.4 per second |
 
@@ -200,7 +232,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 Reel - watch together/
 ├─ index.html      markup + CSP + meta (no inline scripts)
 ├─ styles.css      all styling (paper theme, chat, player, sheets)
-├─ app.js          all application logic (sync, chat, voice, E2E crypto, PWA banner)
+├─ app.js          all application logic (sync, chat, voice, E2E crypto, PWA banner, link finder, playlist)
 ├─ boot.js         tiny Android safe-area bootstrap (runs before CSS)
 ├─ manifest.json   PWA manifest (name, icon sizes, standalone display)
 ├─ sw.js           service worker (offline app shell, versioned cache)
@@ -209,7 +241,7 @@ Reel - watch together/
 └─ README.md       this file
 ```
 
-Load order: `boot.js` (tiny bootstrap in `<head>`), Google Fonts and `peerjs` from unpkg, `styles.css`, then `app.js` at the end of `<body>`. There are **no inline scripts** — the CSP can therefore forbid `'unsafe-inline'` for scripts.
+Load order: `boot.js` (tiny bootstrap in `<head>`), Google Fonts and `peerjs` from unpkg, `styles.css`, then `app.js` at the end of `<body>`. `hls.js` is also fetched from unpkg, but only when an `.m3u8` link is actually played. There are **no inline scripts** — the CSP can therefore forbid `'unsafe-inline'` for scripts.
 
 ---
 
@@ -252,6 +284,12 @@ Use headphones. Reel asks for echo cancellation, but two open speakers in the sa
 **"Voice security check failed"**
 The DTLS fingerprint in the call did not match the authenticated session. This is the fail-closed path for a tampered or relayed media path — leave the room and reconnect on a trusted network; do not ignore it.
 
+**Page crawl says "Could not read that site"**
+The site blocks readers (CORS), the public proxy is down, or the page needs a login. Try again later or paste a direct video link — `.mp4` / `.m3u8` links always work.
+
+**A queued video will not play**
+The host site may have removed the file, require cookies you do not have, or geo-block your region. Remove it from the playlist (✕) and try another source.
+
 **Port 8000 is busy**
 Change `8000` to e.g. `8080` in both places inside `start.cmd`.
 
@@ -270,6 +308,8 @@ Check the code (12 characters, dashes optional), and make sure both people can r
 | In-app browsers (Instagram/WhatsApp/FB) | ⚠️ May strip the referrer and block Web Crypto — open in a real browser |
 
 Voice calls need microphone permission and a secure context. Headphones are recommended; echo cancellation is requested but cannot cancel two loudspeakers in the same room.
+
+HLS (`.m3u8`) plays natively in Safari and via hls.js (loaded on demand from unpkg) in Chrome, Edge and Firefox.
 
 ---
 

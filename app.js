@@ -43,6 +43,8 @@ const state = {
   reconnectAttempts: 0,
   reconnectTimer: null,
   replyTo: null,
+  playlist: [],           // [{ url, name }] — synced over the E2E channel
+  plIndex: -1,            // which playlist item is playing right now
 };
 
 /* ---------- helpers ---------- */
@@ -272,6 +274,7 @@ function destroyYouTube() {
   }
   ytStage.innerHTML = '';
   videoWrap.classList.remove('is-yt');
+  destroyHls();
 }
 
 async function loadYouTube(id, name) {
@@ -339,6 +342,8 @@ const MAX_NAME       = 20;
 const MAX_URL        = 2048;
 const MAX_MEDIA_NAME = 120;
 const MAX_FILE_BYTES = 1536 * 1024 * 1024;   // 1.5 GiB
+const MAX_PLAYLIST   = 50;
+const MAX_PL_NAME    = 120;
 const HANDSHAKE_TIMEOUT = 15000;
 
 const subtleCrypto = (window.crypto && window.crypto.subtle) || null;
@@ -434,6 +439,7 @@ const rxBucket = makeBucket(40, 20);    // incoming control frames
 const rxVoice  = makeBucket(4, 0.2);    // incoming voice invitations
 const rxAnim   = makeBucket(6, 0.5);    // incoming reactions / emoji bursts
 const rxFile   = makeBucket(3, 0.05);   // incoming file offers
+const rxPl     = makeBucket(16, 2);     // incoming playlist frames
 const txChat   = makeBucket(6, 1.5);    // outgoing chat messages
 const txAnim   = makeBucket(4, 0.4);    // outgoing emoji bursts
 
@@ -1067,6 +1073,63 @@ function onSecureMessage(data) {
       setMedia(state.blobUrl, r.name);
       showTransfer('Receiving movie…', 1);
       setTimeout(hideTransfer, 500);
+      break;
+    }
+
+    case 'pl-add': {
+      if (!takeToken(rxPl)) break;
+      const added = plAddRemote(data.items);
+      if (added) addSystem('📋 ' + state.partnerName + ' added ' + added +
+        ' video' + (added > 1 ? 's' : '') + ' to the playlist');
+      break;
+    }
+
+    case 'pl-remove': {
+      if (!takeToken(rxPl)) break;
+      const i = Math.floor(Number(data.i));
+      if (!(i >= 0) || i >= state.playlist.length) break;
+      state.playlist.splice(i, 1);
+      if (state.plIndex === i) state.plIndex = -1;
+      else if (state.plIndex > i) state.plIndex--;
+      renderPlaylistUI();
+      break;
+    }
+
+    case 'pl-jump': {
+      if (!takeToken(rxPl)) break;
+      const i = Math.floor(Number(data.i));
+      const it = state.playlist[i];
+      if (!it) break;
+      state.plIndex = i;
+      renderPlaylistUI();
+      break;
+    }
+
+    case 'pl-clear': {
+      if (!takeToken(rxPl)) break;
+      state.playlist = [];
+      state.plIndex = -1;
+      renderPlaylistUI();
+      addSystem('📋 ' + (state.partnerName || 'Partner') + ' cleared the playlist');
+      break;
+    }
+
+    case 'pl-sync': {
+      // Only the host sends snapshots; the guest adopts the host's list.
+      if (state.role !== 'guest' || !takeToken(rxPl)) break;
+      const items = Array.isArray(data.items) ? data.items.slice(0, MAX_PLAYLIST) : [];
+      const list = [];
+      for (const it of items) {
+        if (!it || typeof it !== 'object') continue;
+        const url = safeMediaUrl(it.url);
+        if (!url) continue;
+        list.push({ url, name: plCleanName(it.name) || guessMediaName(url) });
+        if (list.length >= MAX_PLAYLIST) break;
+      }
+      state.playlist = list;
+      const i = Math.floor(Number(data.i));
+      state.plIndex = (i >= 0 && i < list.length) ? i : -1;
+      renderPlaylistUI();
       break;
     }
   }
@@ -1778,6 +1841,9 @@ function leaveRoom() {
   state.mediaLoaded = false;
   state.localFile = null;
   state.mediaUrl = null;
+  state.playlist = [];
+  state.plIndex = -1;
+  plLastAdvance = 0;
   $('#tap-play').classList.remove('show');
   videoWrap.classList.remove('has-media');
   video.removeAttribute('src');
@@ -1922,6 +1988,63 @@ async function resumeSession() {
 }
 
 /* =========================================================
+   HLS (.m3u8) - hls.js loaded lazily from unpkg when needed.
+   Safari plays HLS natively; everyone else gets hls.js.
+   ========================================================= */
+let hls = null;
+let hlsLoading = null;
+
+function destroyHls() {
+  if (!hls) return;
+  try { hls.destroy(); } catch (e) {}
+  hls = null;
+}
+
+function isHlsUrl(u) {
+  return typeof u === 'string' && /\.m3u8($|[?#])/i.test(u);
+}
+
+function loadHlsLib() {
+  if (window.Hls) return Promise.resolve(true);
+  if (hlsLoading) return hlsLoading;
+  hlsLoading = new Promise(res => {
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/hls.js@1.5.13/dist/hls.min.js';
+    s.onload = () => res(true);
+    s.onerror = () => res(false);
+    document.head.appendChild(s);
+  });
+  return hlsLoading;
+}
+
+async function attachHls(url) {
+  // Safari (and iOS) can play HLS directly
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = url;
+    video.load();
+    video.play().catch(() => { $('#tap-play').classList.add('show'); });
+    return;
+  }
+  const ok = await loadHlsLib();
+  if (!ok || !window.Hls || !window.Hls.isSupported()) {
+    video.src = url;      // best effort - let the browser try
+    video.load();
+    video.play().catch(() => { $('#tap-play').classList.add('show'); });
+    return;
+  }
+  destroyHls();
+  hls = new window.Hls({ enableWorker: true });
+  hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+    video.play().catch(() => { $('#tap-play').classList.add('show'); });
+  });
+  hls.on(window.Hls.Events.ERROR, (ev, d) => {
+    if (d && d.fatal) { toast('Could not play this stream'); destroyHls(); }
+  });
+  hls.loadSource(url);
+  hls.attachMedia(video);
+}
+
+/* =========================================================
    MEDIA
    ========================================================= */
 function revokeBlob() {
@@ -1941,23 +2064,29 @@ function setMedia(url, name) {
   }
 
   if (ytId) {
+    destroyHls();
     state.mediaUrl = url;
     loadYouTube(ytId, name);
     return;
   }
 
   destroyYouTube();
+  destroyHls();
   $('#tap-play').classList.remove('show');
   hideTransfer();
   try { video.pause(); } catch (e) {}
   resetScrub();
   state.mediaUrl = isBlob ? null : url;
   state.mediaName = String(name || 'Movie').slice(0, MAX_MEDIA_NAME);
-  video.src = url;
-  video.load();
   state.mediaLoaded = true;
   videoWrap.classList.add('has-media');
   addSystem('🎬 ' + state.mediaName);
+  if (isHlsUrl(url)) {
+    attachHls(url);
+    return;
+  }
+  video.src = url;
+  video.load();
   // try autoplay (may be blocked)
   video.play().catch(() => { $('#tap-play').classList.add('show'); });
 }
@@ -1968,6 +2097,10 @@ function shareMediaState() {
   } else if (state.mediaUrl) {
     send({ t: 'media-url', url: state.mediaUrl, name: state.mediaName });
   }
+  if (state.playlist.length) {
+    // guest adopts the host's list on (re)connect
+    send({ t: 'pl-sync', items: state.playlist.slice(0, MAX_PLAYLIST), i: state.plIndex });
+  }
   if (state.mediaLoaded) {
     const t = state.isYT ? (ytReady ? ytPlayer.getCurrentTime() : 0) : video.currentTime;
     const paused = state.isYT ? (!ytReady || ytPlayer.getPlayerState() !== 1) : video.paused;
@@ -1975,6 +2108,249 @@ function shareMediaState() {
     send({ t: 'cmd', a: paused ? 'pause' : 'play', time: t });
   }
 }
+
+/* =========================================================
+   PLAYLIST - synced through the encrypted channel.
+   Both people can add, remove and jump. The host's list
+   wins on (re)connect via the pl-sync snapshot.
+   ========================================================= */
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function plCleanName(n) {
+  return String(n || '').replace(/\s+/g, ' ').trim().slice(0, MAX_PL_NAME);
+}
+
+function guessMediaName(url) {
+  let n = '';
+  try { n = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch (e) {}
+  return plCleanName(n) || 'Video';
+}
+
+function plValidateItems(items) {
+  const out = [];
+  if (!Array.isArray(items)) return out;
+  for (const it of items) {
+    if (!it || typeof it !== 'object') continue;
+    const url = safeMediaUrl(it.url);
+    if (!url) continue;
+    out.push({ url, name: plCleanName(it.name) || guessMediaName(url) });
+    if (out.length >= MAX_PLAYLIST) break;
+  }
+  return out;
+}
+
+function plAddRemote(items) {
+  const valid = plValidateItems(items);
+  let added = 0;
+  for (const it of valid) {
+    if (state.playlist.length >= MAX_PLAYLIST) { toast('Playlist is full (50 max)'); break; }
+    state.playlist.push(it);
+    added++;
+  }
+  if (added) {
+    const cur = state.mediaUrl;
+    if (state.plIndex < 0 && cur) {
+      const idx = state.playlist.findIndex(x => x.url === cur);
+      if (idx >= 0) state.plIndex = idx;
+    }
+    renderPlaylistUI();
+  }
+  return added;
+}
+
+function plAddLocal(items) {
+  if (!state.secure) { toast('Wait for the encrypted connection'); return false; }
+  const before = state.playlist.length;
+  const added = plAddRemote(items);
+  if (!added) return false;
+  send({ t: 'pl-add', items: state.playlist.slice(before, before + added) });
+  addSystem('📋 ' + added + ' video' + (added > 1 ? 's' : '') + ' added to the playlist');
+  return true;
+}
+
+function plRemoveLocal(i) {
+  if (!(i >= 0) || i >= state.playlist.length) return;
+  state.playlist.splice(i, 1);
+  if (state.plIndex === i) state.plIndex = -1;
+  else if (state.plIndex > i) state.plIndex--;
+  renderPlaylistUI();
+  send({ t: 'pl-remove', i });
+}
+
+function plClearLocal() {
+  state.playlist = [];
+  state.plIndex = -1;
+  renderPlaylistUI();
+  send({ t: 'pl-clear' });
+  addSystem('📋 Playlist cleared');
+}
+
+function plJumpLocal(i) {
+  const it = state.playlist[i];
+  if (!it) return;
+  if (!state.secure) { toast('Wait for the encrypted connection'); return; }
+  state.plIndex = i;
+  renderPlaylistUI();
+  state.mediaUrl = it.url;
+  state.localFile = null;
+  state.mediaName = it.name;
+  setMedia(it.url, it.name);
+  send({ t: 'pl-jump', i });
+  send({ t: 'media-url', url: it.url, name: it.name });
+}
+
+/* auto-advance when a video ends (2s guard against repeat events) */
+let plLastAdvance = 0;
+function plAdvanceMaybe() {
+  if (Date.now() - plLastAdvance < 2000) return;
+  if (state.plIndex < 0 || state.plIndex >= state.playlist.length - 1) return;
+  const next = state.plIndex + 1;
+  plLastAdvance = Date.now();
+  addSystem('⏭️ Next: ' + state.playlist[next].name);
+  plJumpLocal(next);
+}
+
+video.addEventListener('ended', () => { if (!state.isYT) plAdvanceMaybe(); });
+
+/* ----- playlist sheet ----- */
+let plSheetOpen = false;
+
+function renderPlaylistUI() {
+  if (plSheetOpen) renderPlaylistSheet();
+}
+
+function openPlaylistSheet() {
+  haptic(8);
+  renderPlaylistSheet();
+}
+
+function renderPlaylistSheet() {
+  plSheetOpen = true;
+  const n = state.playlist.length;
+  const rows = state.playlist.map((it, i) => `
+    <div class="pl-row${i === state.plIndex ? ' now' : ''}" data-i="${i}">
+      <div class="pl-num">${i === state.plIndex ? '▶' : (i + 1)}</div>
+      <div class="pl-name">${escHtml(it.name)}</div>
+      <button class="pl-del" data-del="${i}" aria-label="Remove from playlist">✕</button>
+    </div>`).join('');
+  openSheet(`
+    <h3>Playlist</h3>
+    <p>${n
+      ? n + ' video' + (n > 1 ? 's' : '') + ' — tap one to play it for both of you. Videos play one after another automatically.'
+      : 'Nothing queued yet. Use <b>Paste a link</b> — pages with several videos can be added to the queue in one go.'}</p>
+    <div class="pl-list">${rows}</div>
+    ${n ? '<button class="btn ghost" id="pl-clear">Clear playlist</button>' : ''}
+  `);
+  sheetBody.querySelectorAll('.pl-row').forEach(row => {
+    row.addEventListener('click', e => {
+      if (e.target.closest('.pl-del')) return;
+      closeSheet();
+      plJumpLocal(Number(row.dataset.i));
+    });
+  });
+  sheetBody.querySelectorAll('.pl-del').forEach(b => {
+    b.addEventListener('click', () => plRemoveLocal(Number(b.dataset.del)));
+  });
+  const clr = $('#pl-clear');
+  if (clr) clr.addEventListener('click', () => plClearLocal());
+}
+
+/* =========================================================
+   LINK FINDER - paste any page, find the videos on it.
+   Direct fetch first; a public CORS proxy as fallback
+   (browsers cannot read other sites' HTML without one).
+   ========================================================= */
+const MEDIA_EXT_RE = /\.(mp4|webm|ogv|ogg|mov|m4v|mkv|m3u8|mpd)(?:[?#]|$)/i;
+
+function classifyUrl(url) {
+  if (parseYouTube(url)) return 'yt';
+  if (MEDIA_EXT_RE.test(url)) return 'file';
+  return 'page';
+}
+
+const CRAWL_PROXIES = [
+  u => u,
+  u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+];
+
+let crawling = false;
+
+async function fetchPageHtml(url) {
+  for (const wrap of CRAWL_PROXIES) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const res = await fetch(wrap(url), { signal: ctrl.signal, redirect: 'follow' });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (text && text.length > 60) return text;
+    } catch (e) { /* try the next route */ }
+  }
+  return null;
+}
+
+function extractVideos(html, pageUrl) {
+  const found = new Map();
+  const add = raw => {
+    if (!raw || typeof raw !== 'string') return;
+    const u = raw.replace(/&amp;/g, '&').trim();
+    if (!u || u.length > MAX_URL) return;
+    let abs;
+    try { abs = new URL(u, pageUrl).href; } catch (e) { return; }
+    if (!/^https?:/i.test(abs) || abs.length > MAX_URL) return;
+    if (!MEDIA_EXT_RE.test(abs)) return;
+    abs = abs.split('#')[0];
+    if (!found.has(abs)) found.set(abs, guessMediaName(abs));
+  };
+
+  let doc;
+  try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (e) { return []; }
+
+  doc.querySelectorAll('video[src], source[src]').forEach(el => add(el.getAttribute('src')));
+  doc.querySelectorAll(
+    'meta[property="og:video:secure_url"], meta[property="og:video:url"], meta[property="og:video"], ' +
+    'meta[name="twitter:player:stream"]'
+  ).forEach(m => add(m.getAttribute('content')));
+
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+    try {
+      const walk = node => {
+        if (!node || typeof node !== 'object' || found.size > 24) return;
+        if (Array.isArray(node)) { node.forEach(walk); return; }
+        if (typeof node.contentUrl === 'string') add(node.contentUrl);
+        if (typeof node.embedUrl === 'string') add(node.embedUrl);
+        Object.values(node).forEach(walk);
+      };
+      walk(JSON.parse(s.textContent));
+    } catch (e) {}
+  });
+
+  // sweep raw markup for media urls embedded in scripts / JSON
+  const re = /https?:\/\/[^\s"'`<>\\)\]]+?\.(?:mp4|webm|ogv|ogg|mov|m4v|mkv|m3u8|mpd)(?:\?[^\s"'`<>\\)\]]*)?/gi;
+  let m, guard = 0;
+  while ((m = re.exec(html)) && found.size < 24 && guard++ < 5000) add(m[0]);
+
+  return Array.from(found).map(([url, name]) => ({ url, name })).slice(0, 20);
+}
+
+function loadDirectLink(url, kind) {
+  const ytId = kind === 'yt' ? parseYouTube(url) : null;
+  state.mediaUrl = url;
+  state.localFile = null;
+  state.mediaName = String(ytId
+    ? 'YouTube video'
+    : (url.split('/').pop().split('?')[0] || 'Shared movie')).slice(0, MAX_MEDIA_NAME);
+  setMedia(url, state.mediaName);
+  send({ t: 'media-url', url, name: state.mediaName });
+  closeSheet();
+}
+
 
 /* ----- file transfer ----- */
 const CHUNK_SIZE = 16 * 1024;
@@ -2126,6 +2502,8 @@ setInterval(() => {
   if (state.isYT && ytReady && state.mediaLoaded && !scrubbing) {
     paintScrub();
     updatePlayIcon();
+    // YouTube reports "ended" (state 0) with no DOM event we can catch
+    if (ytPlayer.getPlayerState() === 0 && Date.now() > state.suppressUntil) plAdvanceMaybe();
   }
 }, 300);
 
@@ -2199,6 +2577,7 @@ $('#btn-play').addEventListener('click', () => {
   }
   if (video.paused) video.play().catch(() => {}); else video.pause();
 });
+$('#btn-plist').addEventListener('click', openPlaylistSheet);
 $('#tap-play').addEventListener('click', () => {
   $('#tap-play').classList.remove('show');
   if (state.isYT) {
@@ -2719,34 +3098,79 @@ function openSheet(html) {
 function closeSheet() {
   sheetBackdrop.classList.remove('show');
   sheet.classList.remove('show');
+  plSheetOpen = false;
 }
 sheetBackdrop.addEventListener('click', closeSheet);
 
-/* ----- link sheet ----- */
+/* ----- link sheet: YouTube, direct files, or any page with videos ----- */
 function openLinkSheet() {
   haptic(8);
   openSheet(`
     <h3>Paste a movie link</h3>
-    <p>YouTube links work, plus direct .mp4 / .webm / .m3u8 files. Your partner receives it automatically.</p>
+    <p>YouTube and direct video files (.mp4 / .webm / .m3u8…) play straight away. Paste any <b>page</b> link and Reel looks through it for videos.</p>
     <input type="url" id="url-input" placeholder="https://youtube.com/watch?v=…" autocomplete="off" maxlength="2048">
-    <button class="btn" id="url-go">Load movie</button>
+    <button class="btn" id="url-go">Find video</button>
+    <div id="crawl-out"></div>
   `);
   setTimeout(() => $('#url-input').focus(), 350);
 
-  $('#url-go').addEventListener('click', () => {
-    const raw = ($('#url-input').value || '').trim();
-    if (raw.length > MAX_URL) { toast('That link is too long'); return; }
-    const url = safeMediaUrl(raw);
-    if (!url) { toast('Enter a valid http(s) link'); return; }
-    const ytId = parseYouTube(url);
-    state.mediaUrl = url;
-    state.localFile = null;
-    state.mediaName = String(ytId
-      ? 'YouTube video'
-      : (url.split('/').pop().split('?')[0] || 'Shared movie')).slice(0, MAX_MEDIA_NAME);
-    setMedia(url, state.mediaName);
-    send({ t: 'media-url', url, name: state.mediaName });
-    closeSheet();
+  $('#url-go').addEventListener('click', onUrlGo);
+}
+
+function onUrlGo() {
+  const raw = ($('#url-input').value || '').trim();
+  if (raw.length > MAX_URL) { toast('That link is too long'); return; }
+  const url = safeMediaUrl(raw);
+  if (!url) { toast('Enter a valid http(s) link'); return; }
+  const kind = classifyUrl(url);
+  if (kind !== 'page') { loadDirectLink(url, kind); return; }
+  crawlPageLink(url);
+}
+
+async function crawlPageLink(url) {
+  if (crawling) { toast('Still reading the previous page…'); return; }
+  crawling = true;
+  const out = $('#crawl-out');
+  const go = $('#url-go');
+  if (!out || !go) { crawling = false; return; }
+  go.disabled = true;
+  out.innerHTML = '<div class="crawl-status">🔎 Reading the page…</div>';
+  const html = await fetchPageHtml(url);
+  crawling = false;
+  go.disabled = false;
+  if (!out.isConnected) return;                    // sheet was closed meanwhile
+  if (!html) {
+    out.innerHTML = '<div class="crawl-status">Could not read that site — it may block readers or need a login. Try a direct video link (.mp4 / .m3u8).</div>';
+    return;
+  }
+  const vids = extractVideos(html, url);
+  if (!vids.length) {
+    out.innerHTML = '<div class="crawl-status">No video files found on that page.</div>';
+    return;
+  }
+  out.innerHTML = `
+    <div class="crawl-status">Found ${vids.length} video${vids.length > 1 ? 's' : ''}</div>
+    <div class="crawl-list">${vids.map((v, i) => `
+      <div class="crawl-item">
+        <div class="crawl-name" title="${escHtml(v.url)}">${escHtml(v.name)}</div>
+        <button class="crawl-play" data-play="${i}">Play</button>
+        <button class="crawl-add" data-add="${i}">+ Queue</button>
+      </div>`).join('')}</div>
+    ${vids.length > 1 ? '<button class="btn ghost" id="crawl-all">Add all ' + vids.length + ' to playlist</button>' : ''}`;
+
+  const found = vids;
+  out.querySelectorAll('.crawl-play').forEach(b => b.addEventListener('click', () => {
+    loadDirectLink(found[Number(b.dataset.play)].url, 'file');
+  }));
+  out.querySelectorAll('.crawl-add').forEach(b => b.addEventListener('click', () => {
+    if (plAddLocal([found[Number(b.dataset.add)]])) {
+      b.textContent = 'Queued ✓';
+      b.disabled = true;
+    }
+  }));
+  const all = $('#crawl-all');
+  if (all) all.addEventListener('click', () => {
+    if (plAddLocal(found)) { closeSheet(); setTimeout(openPlaylistSheet, 200); }
   });
 }
 $('#btn-link').addEventListener('click', openLinkSheet);
@@ -2784,6 +3208,7 @@ $('#btn-menu').addEventListener('click', () => {
     <div class="sheet-menu">
       <button class="btn ghost" id="m-voice">${voice.status === 'idle' ? '🎙️ Start voice call' : '🎙️ End voice call'}</button>
       <button class="btn ghost" id="m-change">Change movie</button>
+      <button class="btn ghost" id="m-plist">📋 Playlist${state.playlist.length ? ' (' + state.playlist.length + ')' : ''}</button>
       <button class="btn ghost" id="m-copy">Copy room code</button>
       <button class="btn ghost" id="m-share">Share invite</button>
       <button class="btn dark" id="m-leave">Leave room</button>
@@ -2799,6 +3224,7 @@ $('#btn-menu').addEventListener('click', () => {
     closeSheet();
     setTimeout(openMediaChooser, 160);
   });
+  $('#m-plist').addEventListener('click', openPlaylistSheet);
   $('#m-copy').addEventListener('click', () => {
     copyCode();
     closeSheet();
