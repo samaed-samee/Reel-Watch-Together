@@ -1855,6 +1855,13 @@ function enterRoom(sysText) {
 function leaveRoom() {
   state.intentionalLeave = true;
   closeVoice(false);
+  // a browser fullscreen room shouldn't stay fullscreen on the home screen
+  if (appFullscreenEl()) {
+    try {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    } catch (e) {}
+  }
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
   state.reconnectAttempts = 0;
@@ -3336,9 +3343,63 @@ function openMediaChooser() {
   });
 }
 
+/* ---------- app fullscreen (browser tab only) ----------
+   In a normal browser tab fullscreen hides the browser's own toolbar, so the
+   movie gets the whole screen. Installed PWAs and APK-builder webviews already
+   own the window, so the option is not offered there at all. */
+function appFullscreenEl() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function inAppShell() {
+  if (isStandalone()) return true;
+  const mq = window.matchMedia;
+  if (mq) {
+    // minimal-ui is an installed window; "fullscreen" also matches while the
+    // Fullscreen API is active, so only trust it when we are not in fullscreen
+    if (mq('(display-mode: minimal-ui)').matches) return true;
+    if (!appFullscreenEl() && mq('(display-mode: fullscreen)').matches) return true;
+  }
+  const ua = navigator.userAgent || '';
+  if (/;\s*wv\)/i.test(ua)) return true;                    // Android WebView / APK builders
+  if (/Median|GoNative|WebViewGold|Kodika|WebIntoApp|AppMySite/i.test(ua)) return true;
+  if (window.cordova || window.Capacitor || window.ReactNativeWebView) return true;
+  if (window.median || window.gonative || window.webviewGold) return true;
+  return false;
+}
+
+function canUseAppFullscreen() {
+  const el = document.documentElement;
+  return !inAppShell() && !!(el.requestFullscreen || el.webkitRequestFullscreen);
+}
+
+async function toggleAppFullscreen() {
+  const el = document.documentElement;
+  try {
+    if (appFullscreenEl()) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      toast('Fullscreen off');
+    } else {
+      if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' });
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else { toast('Fullscreen is not available in this browser'); return; }
+      toast('Fullscreen on');
+    }
+  } catch (e) {
+    toast('Fullscreen was blocked by the browser');
+  }
+  setTimeout(syncViewport, 300);
+}
+
+document.addEventListener('fullscreenchange', () => setTimeout(syncViewport, 250));
+document.addEventListener('webkitfullscreenchange', () => setTimeout(syncViewport, 250));
+
 /* ----- menu sheet ----- */
 $('#btn-menu').addEventListener('click', () => {
   haptic(8);
+  const fsOk = canUseAppFullscreen();
+  const fsOn = !!appFullscreenEl();
   openSheet(`
     <h3>Room options</h3>
     <p>Code <b style="letter-spacing:1.5px">${formatCode(state.code)}</b></p>
@@ -3348,6 +3409,7 @@ $('#btn-menu').addEventListener('click', () => {
     <div class="sheet-menu">
       <button class="btn ghost" id="m-change">Change movie</button>
       <button class="btn ghost" id="m-plist">📋 Playlist${state.playlist.length ? ' (' + state.playlist.length + ')' : ''}</button>
+      ${fsOk ? `<button class="btn ghost" id="m-fs">${fsOn ? '🗗 Exit fullscreen' : '🖥️ Fullscreen'}</button>` : ''}
       <button class="btn ghost" id="m-share">Share invite</button>
       <button class="btn dark" id="m-leave">Leave room</button>
     </div>
@@ -3358,6 +3420,13 @@ $('#btn-menu').addEventListener('click', () => {
     setTimeout(openMediaChooser, 160);
   });
   $('#m-plist').addEventListener('click', openPlaylistSheet);
+  if (fsOk) {
+    $('#m-fs').addEventListener('click', () => {
+      closeSheet();
+      haptic(10);
+      toggleAppFullscreen();       // must run inside the tap, before the gesture expires
+    });
+  }
   $('#m-share').addEventListener('click', async () => {
     const text = `Watch a movie with me on Reel 🎬\nRoom code: ${formatCode(state.code)}`;
     if (navigator.share) {

@@ -38,7 +38,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 | 😍 **Reactions** | Double-tap a message. One reaction per person, tap again to remove it. |
 | 🔐 **End-to-end encryption** | Authenticated ECDH + HKDF + AES-GCM-256, plus a safety code to detect a man-in-the-middle. |
 | 👥 **Rooms of exactly two** | The host accepts one guest; anyone else is turned away. |
-| 📱 **Mobile-first** | Safe-area aware, keyboard-aware composer, fullscreen with landscape lock. |
+| 📱 **Mobile-first** | Safe-area aware, keyboard-aware composer, fullscreen with landscape lock. Room options also has a browser-only **Fullscreen** toggle that hides the browser toolbar. |
 | 📲 **Installable (PWA)** | One-tap install to the home screen: standalone window, custom app icon and an offline app shell. |
 
 ---
