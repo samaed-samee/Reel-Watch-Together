@@ -82,6 +82,7 @@
       <div class="feature"><div class="fi">🔒</div><div class="ft">Private</div></div>
       <div class="feature"><div class="fi">⚡</div><div class="ft">In sync</div></div>
       <div class="feature"><div class="fi">💬</div><div class="ft">Chat</div></div>
+      <div class="feature"><div class="fi">🎙️</div><div class="ft">Voice</div></div>
     </div>
   </section>
 
@@ -98,6 +99,10 @@
         </div>
         <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Waiting for partner…</span></div>
       </div>
+      <button class="icon-btn voice-btn" id="btn-voice" aria-label="Start voice call" title="Start voice call">
+        <svg class="ic-mic" viewBox="0 0 24 24"><rect x="9" y="2.6" width="6" height="12" rx="3"/><path d="M5.2 11.2a6.8 6.8 0 0013.6 0"/><path d="M12 18v3.2"/></svg>
+        <svg class="ic-mic-off" viewBox="0 0 24 24"><rect x="9" y="2.6" width="6" height="12" rx="3"/><path d="M5.2 11.2a6.8 6.8 0 0013.6 0"/><path d="M12 18v3.2"/><path d="M4 4l16 16"/></svg>
+      </button>
       <button class="icon-btn" id="btn-menu" aria-label="Menu">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/></svg>
       </button>
@@ -152,6 +157,24 @@
       </div>
     </div>
 
+    <div class="voice-bar" id="voice-bar" aria-live="polite">
+      <div class="vb-avatar" id="vb-avatar"><span id="vb-initial">?</span></div>
+      <div class="vb-info">
+        <div class="vb-name" id="vb-name">Partner</div>
+        <div class="vb-status" id="vb-status">Connecting securely…</div>
+      </div>
+      <div class="vb-wave" id="vb-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="vb-actions">
+        <button class="vb-btn" id="btn-voice-mute" aria-label="Mute microphone" title="Mute">
+          <svg class="ic-mic" viewBox="0 0 24 24"><rect x="9" y="2.6" width="6" height="12" rx="3"/><path d="M5.2 11.2a6.8 6.8 0 0013.6 0"/><path d="M12 18v3.2"/></svg>
+          <svg class="ic-mic-off" viewBox="0 0 24 24"><rect x="9" y="2.6" width="6" height="12" rx="3"/><path d="M5.2 11.2a6.8 6.8 0 0013.6 0"/><path d="M12 18v3.2"/><path d="M4 4l16 16"/></svg>
+        </button>
+        <button class="vb-btn end" id="btn-voice-end" aria-label="End voice call" title="End call">
+          <svg viewBox="0 0 24 24"><path d="M3.1 14.7c4.9-4.9 12.9-4.9 17.8 0l-2.5 3.1-3.7-1.7-.3-2.3a18.4 18.4 0 00-4.8 0l-.3 2.3-3.7 1.7z"/></svg>
+        </button>
+      </div>
+    </div>
+
     <div class="chat-wrap">
       <div class="chat" id="chat"></div>
       <div class="typing-ind" id="typing-ind">
@@ -184,6 +207,7 @@
   </section>
 
   <input type="file" id="file-input" accept="video/*" hidden>
+  <audio id="voice-remote" autoplay playsinline aria-hidden="true"></audio>
 
   <div class="sheet-backdrop" id="sheet-backdrop"></div>
   <div class="sheet" id="sheet">

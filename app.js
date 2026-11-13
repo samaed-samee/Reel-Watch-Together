@@ -34,6 +34,7 @@ const state = {
   lastTypingSent: 0,
   clientId: '',
   partnerClientId: '',
+  partnerPeerId: '',      // signalling id of the other browser (used for voice)
   secure: false,          // E2E handshake verified
   crypto: null,           // per-connection AES-GCM keys
   sas: '',                // 6-digit safety code for out-of-band check
@@ -320,6 +321,9 @@ function showHome() {
 function showRoomView() {
   viewHome.classList.add('hidden', 'back');
   viewRoom.classList.remove('hidden', 'back');
+  viewRoom.classList.remove('enter');
+  void viewRoom.offsetWidth;
+  viewRoom.classList.add('enter');
 }
 
 /* =========================================================
@@ -427,6 +431,7 @@ function takeToken(b, cost) {
   return true;
 }
 const rxBucket = makeBucket(40, 20);    // incoming control frames
+const rxVoice  = makeBucket(4, 0.2);    // incoming voice invitations
 const rxAnim   = makeBucket(6, 0.5);    // incoming reactions / emoji bursts
 const rxFile   = makeBucket(3, 0.05);   // incoming file offers
 const txChat   = makeBucket(6, 1.5);    // outgoing chat messages
@@ -434,6 +439,7 @@ const txAnim   = makeBucket(4, 0.4);    // outgoing emoji bursts
 
 /* ---------- encrypted transport ---------- */
 let txChain = Promise.resolve();
+let voiceTxChain = Promise.resolve();
 let rxChain = Promise.resolve();
 
 function resetCrypto() {
@@ -442,6 +448,7 @@ function resetCrypto() {
   state.sas = '';
   rxChain = Promise.resolve();
   txChain = Promise.resolve();
+  voiceTxChain = Promise.resolve();
 }
 
 function sendRaw(obj) {
@@ -584,6 +591,7 @@ function completeHandshake(conn) {
   send({ t: 'hello', name: state.username });
   if (state.role === 'host') shareMediaState();
   updatePartnerUI();
+  updateVoiceUI();
   haptic(20);
 
   if (hs.readyRes) hs.readyRes(true);
@@ -591,6 +599,7 @@ function completeHandshake(conn) {
 
 function failHandshake(conn, reason) {
   if (state.conn !== conn) return;
+  closeVoice(false);
   const hs = conn._hs;
   if (hs && hs.readyRes) hs.readyRes(false);
   state.securityFailure = true;
@@ -605,12 +614,14 @@ function failHandshake(conn, reason) {
    PEER
    ========================================================= */
 function destroyPeer() {
+  closeVoice(false);
   if (state.conn) { try { state.conn.close(); } catch (e) {} }
   if (state.peer) { try { state.peer.destroy(); } catch (e) {} }
   state.conn = null;
   state.peer = null;
   state.connected = false;
   state.partnerOnline = false;
+  state.partnerPeerId = '';
   state.recv = null;
   state.sending = false;
   resetCrypto();
@@ -635,6 +646,7 @@ function initPeer(id) {
     });
 
     peer.on('connection', onIncoming);
+    peer.on('call', onIncomingCall);
 
     peer.on('disconnected', () => {
       try { peer.reconnect(); } catch (e) {}
@@ -695,6 +707,7 @@ function onIncoming(conn) {
 
 function wireConn(conn) {
   state.conn = conn;
+  state.partnerPeerId = conn.peer || '';
   let opened = false;
 
   conn.on('open', () => {
@@ -728,6 +741,7 @@ function wireConn(conn) {
   conn.on('close', () => {
     const wasConnected = state.connected;
     clearTimeout(conn._hsTimer);
+    if (state.conn === conn) closeVoice(false);
     state.connected = false;
     state.partnerOnline = false;
     state.joinAnnounced = false;
@@ -735,7 +749,7 @@ function wireConn(conn) {
     state.recv = null;
     state.sending = false;
     updatePartnerUI();
-    if (state.conn === conn) state.conn = null;
+    if (state.conn === conn) { state.conn = null; state.partnerPeerId = ''; }
     if (state.intentionalLeave) return;
 
     if (state.role === 'guest') {
@@ -760,15 +774,19 @@ function wireConn(conn) {
   }, 9000);
 }
 
-/* App data is encrypted and queued so frames keep their order. */
-function send(obj) {
+/* App data is encrypted and queued so frames keep their order. Voice control
+   frames use their own queue so a long movie transfer never delays a call. */
+function send(obj, urgent) {
   if (!state.secure || !state.crypto) return false;
-  txChain = txChain.then(async () => {
+  const run = async () => {
     if (!state.secure || !state.crypto) return;
     sendRaw(await encryptJSON(obj));
-  }).catch(() => {});
+  };
+  if (urgent) voiceTxChain = voiceTxChain.then(run).catch(() => {});
+  else txChain = txChain.then(run).catch(() => {});
   return true;
 }
+const sendVoice = obj => send(obj, true);
 
 /* File chunks share the same queue, so file-start / chunks / file-end stay ordered. */
 function sendChunk(buf) {
@@ -927,6 +945,36 @@ function onSecureMessage(data) {
       setTimeout(leaveRoom, 900);
       break;
 
+    case 'voice-invite':
+      if (!takeToken(rxVoice)) break;
+      onVoiceInvite();
+      break;
+
+    case 'voice-accept':
+      onVoiceAccept();
+      break;
+
+    case 'voice-decline':
+      onVoiceDecline();
+      break;
+
+    case 'voice-end':
+      onVoiceEnd();
+      break;
+
+    case 'voice-busy':
+      onVoiceBusy();
+      break;
+
+    case 'voice-mute':
+      voice.peerMuted = data.m === true;
+      updateVoiceUI();
+      break;
+
+    case 'voice-fp':
+      if (typeof data.fp === 'string') onVoiceFingerprint(data.fp);
+      break;
+
     case 'chat': {
       if (!isSafeId(data.id)) break;
       if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_TEXT) break;
@@ -1043,6 +1091,588 @@ function onChunk(data) {
 }
 
 /* =========================================================
+   LIVE VOICE
+   Audio travels peer-to-peer over WebRTC (DTLS-SRTP), never
+   through the signalling relay. Each call is bound to the
+   authenticated data channel above by comparing the DTLS
+   certificate fingerprints over the encrypted channel — a
+   relay that swaps SDP cannot pass that check.
+   ========================================================= */
+const voice = {
+  status: 'idle',        // idle | inviting | ringing | connecting | active
+  call: null,
+  localStream: null,
+  remoteStream: null,
+  muted: false,
+  peerMuted: false,
+  inviteTimer: null,
+  connectTimer: null,
+  fpTimer: null,
+  myFp: '',
+  peerFp: '',
+  verified: false,
+  audioCtx: null,
+  analyser: null,
+  meterData: null,
+  meterRaf: 0,
+  level: 0,
+  dialogOpen: false
+};
+
+const voiceBar     = $('#voice-bar');
+const voiceBars    = $$('#vb-wave i');
+const voiceRemote  = $('#voice-remote');
+const btnVoice     = $('#btn-voice');
+const btnVoiceMute = $('#btn-voice-mute');
+const btnVoiceEnd  = $('#btn-voice-end');
+
+function micErrorMessage(err) {
+  const name = err && err.name;
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+    return 'Microphone permission is needed';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+    return 'No microphone found';
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return 'Microphone is busy in another app';
+  }
+  if (name === 'NotSupportedError' || !navigator.mediaDevices) {
+    return 'Voice needs https:// or localhost';
+  }
+  return 'Could not start the microphone';
+}
+
+async function ensureMic() {
+  if (voice.localStream &&
+      voice.localStream.getAudioTracks().some(t => t.readyState === 'live')) {
+    return voice.localStream;
+  }
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+    const e = new Error('unsupported'); e.name = 'NotSupportedError'; throw e;
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false
+  });
+  voice.localStream = stream;
+  stream.getAudioTracks().forEach(t => { t.enabled = !voice.muted; });
+  return stream;
+}
+
+function updateVoiceUI() {
+  if (!voiceBar) return;
+  const st = voice.status;
+  const visible = st === 'inviting' || st === 'connecting' || st === 'active';
+
+  voiceBar.classList.toggle('show', visible);
+  voiceBar.classList.toggle('inviting', st === 'inviting');
+  voiceBar.classList.toggle('connecting', st === 'connecting');
+  voiceBar.classList.toggle('active', st === 'active');
+  voiceBar.classList.toggle('muted', voice.muted);
+  voiceBar.classList.toggle('verified', voice.verified);
+
+  const who = state.partnerName || 'Partner';
+  const nameEl = $('#vb-name');
+  const initialEl = $('#vb-initial');
+  const statusEl = $('#vb-status');
+  if (nameEl) nameEl.textContent = who;
+  if (initialEl) initialEl.textContent = (who.trim().charAt(0) || '?').toUpperCase();
+  if (statusEl) {
+    if (st === 'inviting') statusEl.textContent = 'Calling…';
+    else if (st === 'active') {
+      if (voice.muted) statusEl.textContent = 'You are muted';
+      else if (voice.peerMuted) statusEl.textContent = who + ' is muted';
+      else if (voice.verified) statusEl.textContent = '🔒 Encrypted · verified';
+      else statusEl.textContent = '🔒 Encrypted voice';
+    } else {
+      statusEl.textContent = 'Connecting securely…';
+    }
+  }
+
+  if (btnVoice) {
+    const live = st === 'active';
+    btnVoice.classList.toggle('live', live);
+    btnVoice.classList.toggle('pending', st === 'inviting' || st === 'connecting');
+    btnVoice.classList.toggle('ringing', st === 'ringing');
+    btnVoice.classList.toggle('muted', voice.muted && (st === 'active' || st === 'connecting'));
+    btnVoice.classList.toggle('off', !state.secure);
+    const label = st === 'idle'
+      ? 'Start voice call'
+      : st === 'active'
+        ? (voice.muted ? 'Unmute microphone' : 'Mute microphone')
+        : st === 'inviting'
+          ? 'Cancel voice call'
+          : st === 'ringing'
+            ? 'Incoming voice call'
+            : 'Voice call';
+    btnVoice.setAttribute('aria-label', label);
+    btnVoice.setAttribute('title', label);
+  }
+
+  if (btnVoiceMute) {
+    const on = st === 'active' || st === 'connecting';
+    btnVoiceMute.disabled = !on;
+    btnVoiceMute.style.opacity = on ? '' : '.45';
+  }
+
+  if (!visible && voiceBars.length) {
+    voiceBars.forEach(b => { b.style.transform = ''; });
+  }
+}
+
+async function startVoiceInvite() {
+  if (!state.secure || !state.connected) { toast('Wait for the encrypted connection…'); return; }
+  if (voice.status === 'active' || voice.status === 'connecting') { toggleVoiceMute(); return; }
+  if (voice.status !== 'idle') return;
+
+  try {
+    await ensureMic();
+  } catch (e) {
+    toast(micErrorMessage(e));
+    closeVoice(false);
+    return;
+  }
+  if (!state.secure || !state.connected || voice.status !== 'idle') return;
+
+  voice.muted = false;
+  voice.peerMuted = false;
+  voice.verified = false;
+  voice.myFp = '';
+  voice.peerFp = '';
+  voice.status = 'inviting';
+  sendVoice({ t: 'voice-invite' });
+  updateVoiceUI();
+  haptic(12);
+
+  clearTimeout(voice.inviteTimer);
+  voice.inviteTimer = setTimeout(() => {
+    if (voice.status === 'inviting') { toast('No answer'); closeVoice(false); }
+  }, 30000);
+}
+
+function askJoinVoice() {
+  return showDialog({
+    icon: '🎙️',
+    title: 'Voice call',
+    message: (state.partnerName || 'Your partner') +
+      ' wants to talk. The audio is encrypted end-to-end and goes straight between your two browsers.',
+    okText: 'Join',
+    cancelText: 'Not now',
+    danger: false
+  });
+}
+
+async function acceptVoiceInvite() {
+  if (voice.status !== 'ringing') return;
+
+  try {
+    await ensureMic();
+  } catch (e) {
+    toast(micErrorMessage(e));
+    voice.status = 'idle';
+    sendVoice({ t: 'voice-decline' });
+    updateVoiceUI();
+    return;
+  }
+  if (voice.status !== 'ringing') { closeVoice(false); return; }
+
+  voice.muted = false;
+  voice.peerMuted = false;
+  voice.verified = false;
+  voice.myFp = '';
+  voice.peerFp = '';
+  voice.status = 'connecting';
+  sendVoice({ t: 'voice-accept' });
+  updateVoiceUI();
+  haptic(12);
+  armVoiceConnectTimeout();
+  if (state.role === 'host') maybeStartVoiceCall();
+}
+
+function maybeStartVoiceCall() {
+  if (state.role !== 'host') return;
+  if (voice.status !== 'connecting' || voice.call) return;
+  if (!state.peer || state.peer.destroyed) return;
+  if (!voice.localStream || !state.partnerPeerId) {
+    closeVoice(true, 'Voice call failed');
+    return;
+  }
+
+  let call;
+  try {
+    call = state.peer.call(state.partnerPeerId, voice.localStream, {
+      metadata: { clientId: state.clientId }
+    });
+  } catch (e) {
+    closeVoice(true, 'Voice call failed');
+    return;
+  }
+  if (!call) { closeVoice(true, 'Voice call failed'); return; }
+
+  voice.status = 'connecting';
+  updateVoiceUI();
+  attachVoiceCall(call);
+  armVoiceConnectTimeout();
+}
+
+function attachVoiceCall(call) {
+  if (voice.call) { try { call.close(); } catch (e) {} return; }
+  voice.call = call;
+
+  try {
+    const pc = call.peerConnection;
+    if (pc && pc.addEventListener) {
+      pc.addEventListener('connectionstatechange', () => {
+        if (voice.call !== call) return;
+        if (pc.connectionState === 'failed') closeVoice(true, 'Voice connection failed');
+      });
+    }
+  } catch (e) {}
+
+  call.on('stream', stream => {
+    if (voice.call !== call) return;
+    voice.remoteStream = stream;
+    try {
+      voiceRemote.srcObject = stream;
+      const p = voiceRemote.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+    clearTimeout(voice.connectTimer);
+    voice.connectTimer = null;
+    clearTimeout(voice.inviteTimer);
+    voice.inviteTimer = null;
+    voice.status = 'active';
+    updateVoiceUI();
+    startVoiceMeter(stream);
+    startVoiceFingerprintCheck();
+    haptic(14);
+  });
+
+  call.on('close', () => {
+    if (voice.call !== call) return;
+    voice.call = null;
+    const was = voice.status;
+    closeVoice(false);
+    if (was === 'active' || was === 'connecting') toast('Voice call ended');
+  });
+
+  call.on('error', () => {
+    if (voice.call !== call) return;
+    closeVoice(true, 'Voice call failed');
+  });
+
+  startVoiceFingerprintCheck();
+}
+
+function armVoiceConnectTimeout() {
+  clearTimeout(voice.connectTimer);
+  voice.connectTimer = setTimeout(() => {
+    if (voice.status === 'connecting') closeVoice(true, 'Voice call timed out');
+  }, 25000);
+}
+
+function onVoiceInvite() {
+  if (!state.secure) return;
+  if (voice.status === 'active') { sendVoice({ t: 'voice-busy' }); return; }
+  if (voice.status === 'connecting' || voice.status === 'ringing') return;
+
+  // Both people tapped the mic at the same moment: meet in the middle.
+  if (voice.status === 'inviting') {
+    voice.status = 'connecting';
+    voice.muted = false;
+    voice.peerMuted = false;
+    voice.verified = false;
+    voice.myFp = '';
+    voice.peerFp = '';
+    sendVoice({ t: 'voice-accept' });
+    updateVoiceUI();
+    armVoiceConnectTimeout();
+    if (state.role === 'host') maybeStartVoiceCall();
+    return;
+  }
+
+  if (dlgResolve) { sendVoice({ t: 'voice-decline' }); return; }
+
+  voice.status = 'ringing';
+  updateVoiceUI();
+  haptic(20);
+  clearTimeout(voice.inviteTimer);
+  voice.inviteTimer = setTimeout(() => {
+    if (voice.status === 'ringing') {
+      sendVoice({ t: 'voice-decline' });
+      closeVoice(false);
+    }
+  }, 30000);
+
+  voice.dialogOpen = true;
+  askJoinVoice().then(ok => {
+    voice.dialogOpen = false;
+    clearTimeout(voice.inviteTimer);
+    voice.inviteTimer = null;
+    if (voice.status !== 'ringing') return;
+    if (ok) acceptVoiceInvite();
+    else {
+      voice.status = 'idle';
+      sendVoice({ t: 'voice-decline' });
+      updateVoiceUI();
+    }
+  });
+}
+
+function onVoiceAccept() {
+  if (!state.secure) return;
+  if (voice.status === 'inviting') {
+    voice.status = 'connecting';
+    updateVoiceUI();
+    armVoiceConnectTimeout();
+  }
+  if (voice.status === 'connecting' && state.role === 'host') maybeStartVoiceCall();
+}
+
+function onVoiceDecline() {
+  if (voice.status === 'inviting' || voice.status === 'connecting') {
+    closeVoice(false, 'Voice call declined');
+  }
+}
+
+function onVoiceEnd() {
+  if (voice.status === 'idle') return;
+  const was = voice.status;
+  closeVoice(false);
+  if (was === 'inviting') toast('Call cancelled');
+  else if (was === 'active' || was === 'connecting') toast('Voice call ended');
+}
+
+function onVoiceBusy() {
+  if (voice.status === 'inviting' || voice.status === 'connecting') {
+    closeVoice(false, 'They are already on a voice call');
+  }
+}
+
+function toggleVoiceMute() {
+  if (voice.status !== 'active' && voice.status !== 'connecting') return;
+  voice.muted = !voice.muted;
+  if (voice.localStream) {
+    voice.localStream.getAudioTracks().forEach(t => { t.enabled = !voice.muted; });
+  }
+  sendVoice({ t: 'voice-mute', m: voice.muted });
+  haptic(10);
+  updateVoiceUI();
+}
+
+function closeVoice(notify, message) {
+  const was = voice.status !== 'idle';
+  clearTimeout(voice.inviteTimer); voice.inviteTimer = null;
+  clearTimeout(voice.connectTimer); voice.connectTimer = null;
+  clearInterval(voice.fpTimer); voice.fpTimer = null;
+
+  if (voice.dialogOpen) {
+    voice.dialogOpen = false;
+    if (dlgResolve) closeDialog(false);
+  }
+
+  if (notify && was && state.secure && state.conn && state.conn.open) {
+    sendVoice({ t: 'voice-end' });
+  }
+
+  const call = voice.call;
+  voice.call = null;
+  if (call) { try { call.close(); } catch (e) {} }
+
+  if (voice.localStream) {
+    voice.localStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+    voice.localStream = null;
+  }
+  if (voice.remoteStream) {
+    voice.remoteStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+    voice.remoteStream = null;
+  }
+  try { voiceRemote.pause(); } catch (e) {}
+  try { voiceRemote.srcObject = null; } catch (e) {}
+
+  stopVoiceMeter();
+  voice.status = 'idle';
+  voice.muted = false;
+  voice.peerMuted = false;
+  voice.verified = false;
+  voice.myFp = '';
+  voice.peerFp = '';
+  voice.level = 0;
+  if (voiceBar) voiceBar.style.setProperty('--level', '0');
+  updateVoiceUI();
+  if (message) toast(message);
+}
+
+/* ---------- DTLS fingerprint binding ---------- */
+function sdpFingerprint(sdp) {
+  const m = /a=fingerprint:sha-256\s+([0-9a-f:]+)/i.exec(sdp || '');
+  return m ? m[1].toUpperCase() : '';
+}
+
+function checkVoiceFingerprint() {
+  const call = voice.call;
+  const pc = call && call.peerConnection;
+  if (!pc) return false;
+
+  const local = pc.localDescription ? sdpFingerprint(pc.localDescription.sdp) : '';
+  const remote = pc.remoteDescription ? sdpFingerprint(pc.remoteDescription.sdp) : '';
+
+  if (local && local !== voice.myFp) {
+    voice.myFp = local;
+    sendVoice({ t: 'voice-fp', fp: local });
+  }
+
+  if (remote && voice.peerFp) {
+    if (remote !== voice.peerFp) {
+      clearInterval(voice.fpTimer); voice.fpTimer = null;
+      addSystem('⚠️ Voice security check failed — call closed');
+      closeVoice(true, 'Voice security check failed');
+      return true;
+    }
+    if (!voice.verified) {
+      voice.verified = true;
+      updateVoiceUI();
+      addSystem('🎙️ Voice secured · DTLS fingerprint verified');
+    }
+    // Keep ticking until our own fingerprint has been sent too; otherwise the
+    // peer can never verify us if its SDP was not ready on the first tick.
+    if (voice.myFp) {
+      clearInterval(voice.fpTimer); voice.fpTimer = null;
+    }
+    return true;
+  }
+  return false;
+}
+
+function onVoiceFingerprint(fp) {
+  const value = String(fp).trim();
+  if (!/^([0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(value)) return;
+  voice.peerFp = value.toUpperCase();
+  checkVoiceFingerprint();
+}
+
+function startVoiceFingerprintCheck() {
+  clearInterval(voice.fpTimer);
+  voice.fpTimer = null;
+  let tries = 0;
+  const tick = () => {
+    if (voice.status !== 'active' && voice.status !== 'connecting') {
+      clearInterval(voice.fpTimer); voice.fpTimer = null; return;
+    }
+    checkVoiceFingerprint();
+    if (++tries >= 60) {
+      clearInterval(voice.fpTimer); voice.fpTimer = null;
+      if (!(voice.verified && voice.myFp)) {
+        addSystem('⚠️ Voice verification timed out — call closed');
+        closeVoice(true, 'Voice verification timed out');
+      }
+    }
+  };
+  tick();
+  if (!(voice.verified && voice.myFp) &&
+      (voice.status === 'active' || voice.status === 'connecting')) {
+    voice.fpTimer = setInterval(tick, 250);
+  }
+}
+
+/* ---------- live audio level (speaking glow + waveform) ---------- */
+function startVoiceMeter(stream) {
+  stopVoiceMeter();
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    voice.audioCtx = new AC();
+    try { voice.audioCtx.resume(); } catch (e) {}
+    const source = voice.audioCtx.createMediaStreamSource(stream);
+    const analyser = voice.audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.78;
+    source.connect(analyser);
+    voice.analyser = analyser;
+    voice.meterData = new Uint8Array(analyser.frequencyBinCount);
+
+    const mult = [0.58, 0.82, 1, 0.78, 0.55];
+    const idle = [0.26, 0.48, 0.68, 0.44, 0.6, 0.36, 0.24];
+    const count = voiceBars.length;
+    const tick = () => {
+      if (!voice.analyser || voice.status !== 'active') return;
+      analyser.getByteFrequencyData(voice.meterData);
+      let sum = 0;
+      for (let i = 0; i < voice.meterData.length; i++) sum += voice.meterData[i];
+      let level = Math.min(1, Math.pow((sum / voice.meterData.length / 255) * 3.4, 0.72));
+      if (voice.peerMuted) level = 0;
+      voice.level = level;
+      voiceBar.style.setProperty('--level', level.toFixed(3));
+      const wobbleBase = Date.now() / 190;
+      for (let i = 0; i < count; i++) {
+        const wobble = 0.82 + 0.18 * Math.sin(wobbleBase + i * 1.7);
+        const base = idle[i % idle.length];
+        const h = Math.min(1, base + Math.min(1, level * 2.4) * mult[i % mult.length] * 0.58 * wobble);
+        voiceBars[i].style.transform = 'scaleY(' + h.toFixed(3) + ')';
+      }
+      voice.meterRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (e) {}
+}
+
+function stopVoiceMeter() {
+  if (voice.meterRaf) { cancelAnimationFrame(voice.meterRaf); voice.meterRaf = 0; }
+  voice.analyser = null;
+  voice.meterData = null;
+  voice.level = 0;
+  if (voice.audioCtx) { try { voice.audioCtx.close(); } catch (e) {} voice.audioCtx = null; }
+  voiceBars.forEach(b => { b.style.transform = ''; });
+}
+
+/* ---------- incoming MediaConnection (guest answers) ---------- */
+function onIncomingCall(call) {
+  const reject = () => { try { call.close(); } catch (e) {} };
+
+  if (!state.secure || state.role !== 'guest') { reject(); return; }
+  if (voice.status !== 'connecting' && voice.status !== 'inviting') { reject(); return; }
+  if (voice.call) { reject(); return; }
+  if (!call.peer || (state.partnerPeerId && call.peer !== state.partnerPeerId)) { reject(); return; }
+  if (!voice.localStream) {
+    reject();
+    closeVoice(false);
+    toast('Microphone is not ready');
+    return;
+  }
+
+  try {
+    call.answer(voice.localStream);
+  } catch (e) {
+    reject();
+    closeVoice(false);
+    toast('Could not answer the call');
+    return;
+  }
+
+  voice.status = 'connecting';
+  updateVoiceUI();
+  armVoiceConnectTimeout();
+  attachVoiceCall(call);
+}
+
+/* ---------- voice buttons ---------- */
+btnVoice.addEventListener('click', () => {
+  haptic(10);
+  if (!state.secure || !state.connected) {
+    toast('Wait for the encrypted connection…');
+    return;
+  }
+  if (voice.status === 'idle') startVoiceInvite();
+  else if (voice.status === 'inviting') closeVoice(true, 'Call cancelled');
+  else if (voice.status === 'active' || voice.status === 'connecting') toggleVoiceMute();
+  else if (voice.status === 'ringing') toast('Answer the call first');
+});
+
+btnVoiceMute.addEventListener('click', () => { haptic(8); toggleVoiceMute(); });
+btnVoiceEnd.addEventListener('click', () => { haptic(10); closeVoice(true, 'Voice call ended'); });
+
+/* =========================================================
    ROOM LIFECYCLE
    ========================================================= */
 function readUsername() {
@@ -1098,6 +1728,7 @@ async function joinRoom(rawCode) {
 }
 
 function enterRoom(sysText) {
+  closeVoice(false);
   $('#code-text').textContent = formatCode(state.code);
   chat.innerHTML = '';
   state.messages = [];
@@ -1108,6 +1739,7 @@ function enterRoom(sysText) {
   state.partnerOnline = false;
   state.joinAnnounced = false;
   state.securityFailure = false;
+  state.partnerPeerId = '';
   if (!state.conn) resetCrypto();
   destroyYouTube();
   revokeBlob();
@@ -1124,6 +1756,7 @@ function enterRoom(sysText) {
 
 function leaveRoom() {
   state.intentionalLeave = true;
+  closeVoice(false);
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
   state.reconnectAttempts = 0;
@@ -1137,6 +1770,7 @@ function leaveRoom() {
   state.joinAnnounced = false;
   state.securityFailure = false;
   state.partnerClientId = '';
+  state.partnerPeerId = '';
   state.messages = [];
   chat.innerHTML = '';
   destroyYouTube();
@@ -1176,6 +1810,7 @@ function updatePartnerUI() {
   } else {
     setStatus('waiting', 'Waiting for partner…');
   }
+  updateVoiceUI();
 }
 
 /* Announce the partner by name, once per join. */
@@ -2147,6 +2782,7 @@ $('#btn-menu').addEventListener('click', () => {
       ? '🔒 Safety code <b style="letter-spacing:1.5px">' + state.sas.slice(0, 3) + ' ' + state.sas.slice(3) + '</b> — compare it with your partner.'
       : 'Waiting for an encrypted connection…'}</p>
     <div class="sheet-menu">
+      <button class="btn ghost" id="m-voice">${voice.status === 'idle' ? '🎙️ Start voice call' : '🎙️ End voice call'}</button>
       <button class="btn ghost" id="m-change">Change movie</button>
       <button class="btn ghost" id="m-copy">Copy room code</button>
       <button class="btn ghost" id="m-share">Share invite</button>
@@ -2154,6 +2790,11 @@ $('#btn-menu').addEventListener('click', () => {
     </div>
   `);
 
+  $('#m-voice').addEventListener('click', () => {
+    closeSheet();
+    if (voice.status === 'idle') startVoiceInvite();
+    else closeVoice(true, 'Voice call ended');
+  });
   $('#m-change').addEventListener('click', () => {
     closeSheet();
     setTimeout(openMediaChooser, 160);
@@ -2377,6 +3018,7 @@ window.addEventListener('orientationchange', () => setTimeout(syncViewport, 300)
 window.addEventListener('beforeunload', e => {
   if (state.connected) { e.preventDefault(); e.returnValue = ''; }
 });
+window.addEventListener('pagehide', () => { closeVoice(false); });
 
 // splash + resume previous session
 window.addEventListener('load', () => {
