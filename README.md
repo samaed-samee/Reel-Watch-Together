@@ -239,7 +239,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 
 ### Other hardening
 
-- **Content-Security-Policy** — only `self`, unpkg (PeerJS), Google Fonts and YouTube are allowed; `object-src`, `base-uri` and `form-action` are locked down.
+- **Content-Security-Policy** — only `self` (including the vendored PeerJS and hls.js in `vendor/`), Google Fonts and YouTube are allowed; `object-src`, `base-uri` and `form-action` are locked down.
 - **Strict referrer policy** for the YouTube embed.
 - **Strict input validation** on every field (ids, emoji whitelist, `http(s)` URLs only, `video/*` MIME only, clamped playback times).
 - **Tamper resistance** — GCM authentication rejects modified, forged or replayed ciphertext.
@@ -291,7 +291,7 @@ Reel - watch together/
 └─ README.md       this file
 ```
 
-Load order: `boot.js` (tiny bootstrap in `<head>`), Google Fonts and `peerjs` from unpkg, `styles.css`, then `app.js` at the end of `<body>`. `hls.js` is also fetched from unpkg, but only when an `.m3u8` link is actually played. There are **no inline scripts** — the CSP can therefore forbid `'unsafe-inline'` for scripts.
+Load order: `boot.js` (tiny bootstrap in `<head>`), Google Fonts, `vendor/peer.min.js`, `styles.css`, then `app.js` at the end of `<body>`. `vendor/hls.min.js` is also loaded from this origin, but only when an `.m3u8` link is actually played. No third-party script executes in the app's origin. There are **no inline scripts** — the CSP can therefore forbid `'unsafe-inline'` for scripts.
 
 ---
 
@@ -362,7 +362,7 @@ Check the code (12 characters, dashes optional), and make sure both people can r
 
 Voice calls need microphone permission and a secure context. Headphones are recommended; echo cancellation is requested but cannot cancel two loudspeakers in the same room.
 
-HLS (`.m3u8`) plays natively in Safari and via hls.js (loaded on demand from unpkg) in Chrome, Edge and Firefox.
+HLS (`.m3u8`) plays natively in Safari and via hls.js (loaded on demand from `vendor/`) in Chrome, Edge and Firefox.
 
 ---
 

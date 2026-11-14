@@ -1,22 +1,29 @@
 /* =========================================================
    Reel service worker - offline app shell
-   Only same-origin files are cached; PeerJS, fonts and YouTube
-   always go to the network (the app needs them live anyway).
+   Only same-origin app-shell files are cached. PeerJS and hls.js
+   are vendored into ./vendor/, so they are part of the shell too.
+   YouTube, fonts and media always go to the network.
    Bump VERSION whenever you ship changed app files, or the old
    shell keeps coming back from the cache.
    ========================================================= */
-const VERSION = 'reel-shell-v17';
+const VERSION = 'reel-shell-v18';
 const SHELL = [
   './',
   './index.html',
-  './styles.css?v=17',
-  './app.js?v=17',
+  './styles.css?v=18',
+  './app.js?v=18',
   './boot.js',
   './manifest.json',
+  './vendor/peer.min.js',
+  './vendor/hls.min.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
 ];
+
+/* Paths that may be written to the cache. Query strings identify the shell
+   version but are not part of the file name, so match on the path only. */
+const SHELL_PATHS = new Set(SHELL.map(p => new URL(p, self.location.href).pathname));
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -35,18 +42,28 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
+  const req = e.request;
+
+  // Never cache (or intercept) non-GET traffic: the Cache API only stores
+  // GET responses, and a rejected put would surface as an unhandled error.
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
   if (url.origin !== location.origin) return; // CDN / YouTube / WebRTC traffic passes straight through
-  if (e.request.headers.has('range')) return; // media streaming: let <video> talk to the network directly
+  if (req.headers.has('range')) return;       // media streaming: let <video> talk to the network directly
 
   // Page navigations: network first so updates land quickly,
   // cached shell as the offline fallback.
-  if (e.request.mode === 'navigate') {
+  if (req.mode === 'navigate') {
     e.respondWith(
-      fetch(e.request)
+      fetch(req)
         .then(res => {
-          const copy = res.clone();
-          caches.open(VERSION).then(c => c.put('./index.html', copy));
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(VERSION)
+              .then(c => c.put('./index.html', copy))
+              .catch(() => {});
+          }
           return res;
         })
         .catch(() => caches.match('./index.html'))
@@ -54,17 +71,23 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  // Only app-shell files are cached. Everything else same-origin is left
+  // to the network so arbitrary responses never end up in the cache.
+  if (!SHELL_PATHS.has(url.pathname)) return;
+
   // Same-origin assets: network first so updates apply right away,
   // falling back to cache when offline.
   e.respondWith(
-    fetch(e.request)
+    fetch(req)
       .then(res => {
         if (res && res.ok) {
           const copy = res.clone();
-          caches.open(VERSION).then(c => c.put(e.request, copy));
+          caches.open(VERSION)
+            .then(c => c.put(req, copy))
+            .catch(() => {});
         }
         return res;
       })
-      .catch(() => caches.match(e.request))
+      .catch(() => caches.match(req))
   );
 });

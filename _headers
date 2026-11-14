@@ -1,0 +1,19 @@
+# Security headers for static hosts that read a _headers file
+# (Netlify, Cloudflare Pages, and compatible platforms).
+#
+# The app also carries a <meta> CSP so it stays protected on a plain local
+# server, but frame-ancestors / HSTS / COOP can only be set as real headers.
+# If you deploy elsewhere, copy these values into that host's config.
+
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: microphone=(self), camera=(), geolocation=()
+
+# Vendored libraries are served from this origin; keep their type unambiguous.
+/vendor/*
+  X-Content-Type-Options: nosniff

@@ -116,14 +116,31 @@ function loadSession() {
 function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
 }
-function getClientId() {
-  try {
-    let id = localStorage.getItem(CLIENT_KEY);
-    if (!id) { id = uid() + uid(); localStorage.setItem(CLIENT_KEY, id); }
-    return id;
-  } catch (e) { return uid() + uid(); }
+
+/* The host uses this id only to tell "the same guest reconnecting" apart from
+   "a new guest", so a phone that slept leaves no zombie session behind. It is
+   stored per room code and rotated whenever the room changes, so the relay
+   (which sees the id in the connection metadata) cannot link you across rooms.
+   Within one room it stays stable across reconnects and reloads. */
+let memClient = null;      // fallback when localStorage is unavailable
+function ensureClientId() {
+  const code = state.code || '';
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(CLIENT_KEY) || 'null'); } catch (e) { stored = null; }
+  if (!stored || typeof stored !== 'object') stored = memClient;
+
+  if (stored && stored.code === code && isSafeId(stored.id)) {
+    memClient = { code, id: stored.id };
+    state.clientId = stored.id;
+    return state.clientId;
+  }
+
+  const id = uid() + uid();
+  memClient = { code, id };
+  state.clientId = id;
+  try { localStorage.setItem(CLIENT_KEY, JSON.stringify(memClient)); } catch (e) {}
+  return id;
 }
-state.clientId = getClientId();
 
 /* ---------- floating emoji ---------- */
 const floatLayer = document.createElement('div');
@@ -680,6 +697,27 @@ async function handshakeAuth(conn, msg) {
   completeHandshake(conn);
 }
 
+/* Messages that were handed to the previous transport but never acknowledged
+   are re-sent once the new handshake verifies. The receiver de-duplicates by
+   id, so a replay is harmless while a frame lost during the drop is recovered.
+   Only recent, still-unread messages of ours are retried. */
+const CHAT_RESEND_MAX = 20;
+const CHAT_RESEND_AGE = 10 * 60 * 1000;
+
+function resendPendingMessages() {
+  const now = Date.now();
+  const pending = state.messages
+    .filter(m => m.from === 'me' && m.status !== 'read' &&
+                 now - m.ts < CHAT_RESEND_AGE)
+    .slice(-CHAT_RESEND_MAX);
+
+  for (const m of pending) {
+    const payload = { t: 'chat', id: m.id, text: m.text, ts: m.ts };
+    if (m.reply) payload.reply = m.reply;
+    if (send(payload)) { m.status = 'delivered'; paintTicks(m); }
+  }
+}
+
 function completeHandshake(conn) {
   if (state.conn !== conn) return;
   const hs = conn._hs;
@@ -690,11 +728,18 @@ function completeHandshake(conn) {
   state.sas = sasFromTranscript(hs.transcript);
   state.securityFailure = false;
 
+  // A (re)handshake begins a new session on both ends, so playlist numbering
+  // restarts here. The playlist itself and the chat history are left intact.
+  state.plTx = 0;
+  state.plRx = 0;
+  state.plAskAt = 0;
+
   const pretty = state.sas.slice(0, 3) + ' ' + state.sas.slice(3);
   addSystem('🔒 End-to-end encrypted · safety code ' + pretty);
   toast('Verify code ' + pretty + ' with your partner');
 
   send({ t: 'hello', name: state.username });
+  resendPendingMessages();
   if (state.role === 'host') shareMediaState();
   updatePartnerUI();
   updateVoiceUI();
@@ -1181,7 +1226,12 @@ function onSecureMessage(data) {
     case 'chat': {
       if (!isSafeId(data.id)) break;
       if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_TEXT) break;
-      if (state.messages.some(x => x.id === data.id)) break;   // ignore replays
+      if (state.messages.some(x => x.id === data.id)) {
+        // A message re-sent after a reconnect: ack it again so the sender
+        // marks it delivered instead of retrying, and add no second bubble.
+        send({ t: 'read', ids: [data.id] });
+        break;
+      }
       const text = cleanChatText(data.text, MAX_TEXT);
       if (!text) break;
       addMessage({
@@ -2042,6 +2092,7 @@ async function hostRoom() {
     return;
   }
   state.code = code;
+  ensureClientId();
   saveSession();
   enterRoom('Room created · share the code');
 }
@@ -2066,6 +2117,7 @@ async function joinRoom(rawCode) {
   }
 
   state.code = code;
+  ensureClientId();
   saveSession();
   enterRoom('Joining room…');
 
@@ -2334,6 +2386,7 @@ async function resumeSession() {
   if (s.username) { state.username = s.username; $('#name-input').value = s.username; }
   state.code = s.code;
   state.role = s.role;
+  ensureClientId();       // same room → same id, so the host replaces our old socket
   state.intentionalLeave = false;
   state.reconnectAttempts = 0;
 
@@ -2374,7 +2427,7 @@ async function resumeSession() {
 }
 
 /* =========================================================
-   HLS (.m3u8) - hls.js loaded lazily from unpkg when needed.
+   HLS (.m3u8) - hls.js loaded lazily from vendor/hls.min.js when needed.
    Safari plays HLS natively; everyone else gets hls.js.
    ========================================================= */
 let hls = null;
@@ -2395,7 +2448,7 @@ function loadHlsLib() {
   if (hlsLoading) return hlsLoading;
   hlsLoading = new Promise(res => {
     const s = document.createElement('script');
-    s.src = 'https://unpkg.com/hls.js@1.5.13/dist/hls.min.js';
+    s.src = 'vendor/hls.min.js';       // vendored: no third-party script execution
     s.onload = () => res(true);
     s.onerror = () => res(false);
     document.head.appendChild(s);
