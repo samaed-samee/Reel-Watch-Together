@@ -45,6 +45,9 @@ const state = {
   replyTo: null,
   playlist: [],           // [{ url, name }] — synced over the E2E channel
   plIndex: -1,            // which playlist item is playing right now
+  plTx: 0,                // our own playlist-delta counter
+  plRx: 0,                // last counter value applied from the partner
+  plAskAt: 0,             // last snapshot request (loop guard)
   localQueue: [],         // extra File objects picked here — play after this one
   pingWait: null,         // pending liveness probe after coming back to the app
   aspect: { mode: 'fit', frame: '16-9' },   // how a direct video fills the player (local)
@@ -195,9 +198,21 @@ function loadYTAPI() {
   return ytApiPromise;
 }
 
+/* Strict host parsing: a link counts as a YouTube video only if its *hostname*
+   is YouTube's — not merely because the string contains "youtube.com". */
 function parseYouTube(url) {
   if (!url) return null;
-  const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  let u;
+  try { u = new URL(String(url), location.href); } catch (e) { return null; }
+  const host = u.hostname.toLowerCase().replace(/^(www|m)\./, '');
+  if (host === 'youtu.be') {
+    const id = u.pathname.slice(1).split('/')[0];
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+  }
+  if (host !== 'youtube.com' && host !== 'youtube-nocookie.com') return null;
+  const v = u.searchParams.get('v') || '';
+  if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+  const m = /^\/(?:embed|shorts|live|v)\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/.exec(u.pathname);
   return m ? m[1] : null;
 }
 
@@ -352,10 +367,18 @@ const MAX_TEXT       = 2000;
 const MAX_NAME       = 20;
 const MAX_URL        = 2048;
 const MAX_MEDIA_NAME = 120;
-const MAX_FILE_BYTES = 1536 * 1024 * 1024;   // 1.5 GiB
+const MAX_FILE_BYTES = 512 * 1024 * 1024;    // 512 MiB (held in RAM while receiving)
 const MAX_PLAYLIST   = 50;
 const MAX_PL_NAME    = 120;
 const HANDSHAKE_TIMEOUT = 15000;
+
+/* Receive-path ceilings. Everything an unauthenticated peer can make us buffer
+   before the handshake completes is bounded here. */
+const CHUNK_SIZE       = 16 * 1024;              // plaintext file chunk
+const MAX_CHUNK_FRAME  = CHUNK_SIZE + 1 + 12 + 16;
+const MAX_CTRL_FRAME   = 192 * 1024;             // base64 chars (~144 KB)
+const MAX_PRE_SECURE   = 16;                     // frames held before verification
+const MAX_RXQ          = 64;                     // depth of the decrypt queue
 
 /* Voice is audible only after the call's DTLS fingerprint matches the one sent
    over the authenticated data channel. These bound the window in which an
@@ -421,22 +444,70 @@ function sasFromTranscript(t) {
 function isSafeId(v) {
   return typeof v === 'string' && /^[a-z0-9]{1,32}$/i.test(v);
 }
-function safeMediaUrl(u) {
+
+/* Peer-supplied text: strip control characters and bidi overrides so a message
+   cannot rewrite the UI around it. Newlines survive in chat, not in names. */
+const STRIP_CTRL_LOOSE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+const STRIP_CTRL_ALL   = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+function cleanChatText(s, max) {
+  return String(s == null ? '' : s).replace(STRIP_CTRL_LOOSE, '').slice(0, max);
+}
+function cleanDisplayName(s, max) {
+  return String(s == null ? '' : s).replace(STRIP_CTRL_ALL, '').trim().slice(0, max);
+}
+/* A peer's clock is not trusted; keep timestamps in a sane window. */
+function clampTs(ts) {
+  if (!Number.isFinite(ts)) return Date.now();
+  const now = Date.now(), w = 5 * 60 * 1000;
+  return Math.min(now + w, Math.max(now - w, ts));
+}
+/* A peer must never be able to point our player at loopback or the local
+   network. Media URLs have to be publicly reachable by both sides anyway. */
+function isPrivateHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || /\.(local|internal|home\.arpa)$/.test(h)) return true;
+
+  const asV4 = s => {
+    const p = s.split('.').map(Number);
+    if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return p;
+  };
+  let v4 = asV4(h);
+  if (!v4 && /^::ffff:/i.test(h)) v4 = asV4(h.slice(7));
+  if (v4) {
+    const [a, b] = v4;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  if (h.indexOf(':') >= 0) {   // IPv6
+    return h === '::1' || h === '::' ||
+           /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h);
+  }
+  return false;
+}
+
+function safeMediaUrl(u, allowPrivate) {
   if (typeof u !== 'string' || !u || u.length > MAX_URL) return null;
   if (!/^https?:\/\//i.test(u)) return null;
   try {
     const p = new URL(u);
-    return (p.protocol === 'http:' || p.protocol === 'https:') ? p.href : null;
+    if (p.protocol !== 'http:' && p.protocol !== 'https:') return null;
+    if (!allowPrivate && isPrivateHost(p.hostname)) return null;
+    return p.href;
   } catch (e) { return null; }
 }
 function cleanReply(r) {
   if (!r || typeof r !== 'object') return null;
-  const text = typeof r.text === 'string' ? r.text.slice(0, MAX_TEXT) : '';
+  const text = typeof r.text === 'string' ? cleanChatText(r.text, MAX_TEXT) : '';
   if (!text) return null;
   return {
     id: isSafeId(r.id) ? r.id : '',
     text,
-    name: typeof r.name === 'string' ? r.name.slice(0, MAX_NAME) : ''
+    name: typeof r.name === 'string' ? cleanDisplayName(r.name, MAX_NAME) : ''
   };
 }
 
@@ -458,8 +529,9 @@ const rxHs     = makeBucket(8, 2);      // incoming handshake frames (own bucket
 const rxVoice  = makeBucket(4, 0.2);    // incoming voice invitations
 const rxAnim   = makeBucket(6, 0.5);    // incoming reactions / emoji bursts
 const rxFile   = makeBucket(3, 0.05);   // incoming file offers
-const rxPl     = makeBucket(16, 2);     // incoming playlist frames
+const rxPl     = makeBucket(32, 8);     // incoming playlist frames
 const rxPing   = makeBucket(6, 1);      // incoming liveness probes
+const rxBytes  = makeBucket(1536 * 1024, 1536 * 1024);  // control plaintext/s
 const txChat   = makeBucket(6, 1.5);    // outgoing chat messages
 const txAnim   = makeBucket(4, 0.4);    // outgoing emoji bursts
 
@@ -467,12 +539,19 @@ const txAnim   = makeBucket(4, 0.4);    // outgoing emoji bursts
 let txChain = Promise.resolve();
 let voiceTxChain = Promise.resolve();
 let rxChain = Promise.resolve();
+let rxqDepth = 0;          // tasks currently queued on rxChain
 
 function resetCrypto() {
   state.secure = false;
   state.crypto = null;
   state.sas = '';
   rxChain = Promise.resolve();
+  rxqDepth = 0;
+  rxBytes.tokens = rxBytes.cap;
+  // Playlist deltas are numbered per connection: a reloaded peer restarts at 1.
+  state.plTx = 0;
+  state.plRx = 0;
+  state.plAskAt = 0;
   txChain = Promise.resolve();
   voiceTxChain = Promise.resolve();
 }
@@ -630,6 +709,8 @@ function failHandshake(conn, reason) {
   const hs = conn._hs;
   if (hs && hs.readyRes) hs.readyRes(false);
   state.securityFailure = true;
+  state.partnerClientId = '';
+  state.partnerOnline = false;
   resetCrypto();
   setStatus('off', 'Security check failed');
   addSystem('⚠️ ' + reason + ' — connection closed');
@@ -736,7 +817,8 @@ function onIncoming(conn) {
     return;
   }
 
-  const incomingId = conn.metadata && conn.metadata.clientId;
+  const incomingId = (conn.metadata && isSafeId(conn.metadata.clientId))
+    ? conn.metadata.clientId : '';
 
   // If we already have a live partner connection
   if (state.conn && state.conn.open) {
@@ -774,8 +856,12 @@ function connIsZombie(conn) {
 }
 
 function wireConn(conn) {
+  resetCrypto();          // a new transport never inherits the old keys
   state.conn = conn;
   conn._hs = null;        // a reused transport must start a fresh handshake
+  conn._lastKeyAt = 0;
+  conn._preEnc = 0;
+  conn._preChunks = 0;
   state.partnerPeerId = conn.peer || '';
   let opened = false;
 
@@ -790,7 +876,8 @@ function wireConn(conn) {
     updatePartnerUI();
 
     if (state.role === 'host') {
-      state.partnerClientId = (conn.metadata && conn.metadata.clientId) || '';
+      state.partnerClientId = (conn.metadata && isSafeId(conn.metadata.clientId))
+        ? conn.metadata.clientId : '';
     }
 
     // mark all pending as delivered
@@ -897,8 +984,12 @@ function onData(conn, data) {
         // The partner rebuilt its side of the transport and is re-handshaking
         // on a connection object we still hold (mobile app switching). Restart
         // ours as well, otherwise we would keep the stale keys and go silent.
-        if (Date.now() - (conn._hsAt || 0) < 1200) return;   // ignore replays
+        // Throttled, so a malicious path cannot force an endless key reset.
+        if (conn._lastKeyAt && Date.now() - conn._lastKeyAt < 5000) return;
+        conn._lastKeyAt = Date.now();
         conn._hs = null;
+        conn._preEnc = 0;
+        conn._preChunks = 0;
         if (state.conn === conn) resetCrypto();
         conn._pre = [msg];
         startHandshake(conn);
@@ -931,9 +1022,24 @@ function dispatchHandshake(conn, msg) {
 
 function queueIncoming(conn, msg) {
   if (!conn._hs) return;
+  if (typeof msg.d !== 'string' || msg.d.length > MAX_CTRL_FRAME) return;
+
+  // Before the handshake is verified, hold only a small, fixed amount.
+  if (!state.secure) {
+    conn._preEnc = (conn._preEnc || 0) + 1;
+    if (conn._preEnc > MAX_PRE_SECURE) return;
+  }
+  if (rxqDepth >= MAX_RXQ) return;
+  // Budget the decryption work: no peer can make us chew through megabytes of
+  // ciphertext per second, whatever the frame rate limit allows.
+  if (!takeToken(rxBytes, msg.d.length)) return;
+
+  rxqDepth++;
   rxChain = rxChain.then(async () => {
-    if (!(await awaitSecure(conn))) return;
-    await decryptMessage(conn, msg);
+    try {
+      if (!(await awaitSecure(conn))) return;
+      await decryptMessage(conn, msg);
+    } finally { rxqDepth--; }
   }).catch(() => {});
 }
 
@@ -949,7 +1055,7 @@ function awaitSecure(conn) {
 
 async function decryptMessage(conn, msg) {
   if (state.conn !== conn || !state.secure || !state.crypto) return;
-  if (typeof msg.d !== 'string' || !msg.d || msg.d.length > 400000) return;
+  if (typeof msg.d !== 'string' || !msg.d || msg.d.length > MAX_CTRL_FRAME) return;
 
   let raw;
   try { raw = b64decode(msg.d); } catch (e) { return; }
@@ -972,28 +1078,34 @@ async function decryptMessage(conn, msg) {
 
 function onEncryptedChunk(conn, data) {
   if (state.conn !== conn || !conn._hs) return;
-  // Before verification finishes, hold at most ~4 MB of frames.
-  if (!state.secure) {
-    conn._hs.pre = (conn._hs.pre || 0) + 1;
-    if (conn._hs.pre > 256) return;
-  }
   const u8 = data instanceof ArrayBuffer
     ? new Uint8Array(data)
     : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   if (u8.length < 1 + 12 + 16 || u8[0] !== CHUNK_MAGIC) return;
+  if (u8.length > MAX_CHUNK_FRAME) return;      // always 16 KB plaintext, never more
+
+  // Before verification, hold only a handful of chunks (~256 KB).
+  if (!state.secure) {
+    conn._preChunks = (conn._preChunks || 0) + 1;
+    if (conn._preChunks > MAX_PRE_SECURE) return;
+  }
+  if (rxqDepth >= MAX_RXQ) return;
 
   const frame = u8.slice();     // transport reuses the buffer — copy it
+  rxqDepth++;
   rxChain = rxChain.then(async () => {
-    if (!(await awaitSecure(conn))) return;
-    if (!state.secure || !state.crypto) return;
-    let plain;
     try {
-      plain = await subtleCrypto.decrypt(
-        { name: 'AES-GCM', iv: frame.subarray(1, 13), additionalData: CHUNK_AAD },
-        state.crypto.recvChunk, frame.subarray(13)
-      );
-    } catch (e) { return; }
-    onChunk(plain);
+      if (!(await awaitSecure(conn))) return;
+      if (!state.secure || !state.crypto) return;
+      let plain;
+      try {
+        plain = await subtleCrypto.decrypt(
+          { name: 'AES-GCM', iv: frame.subarray(1, 13), additionalData: CHUNK_AAD },
+          state.crypto.recvChunk, frame.subarray(13)
+        );
+      } catch (e) { return; }
+      onChunk(plain);
+    } finally { rxqDepth--; }
   }).catch(() => {});
 }
 
@@ -1001,7 +1113,7 @@ function onEncryptedChunk(conn, data) {
 function onSecureMessage(data) {
   switch (data.t) {
     case 'hello': {
-      const theirName = String(data.name || '').trim().slice(0, MAX_NAME);
+      const theirName = cleanDisplayName(data.name, MAX_NAME);
       state.partnerName = theirName || 'Partner';
       state.partnerOnline = true;
 
@@ -1070,13 +1182,15 @@ function onSecureMessage(data) {
       if (!isSafeId(data.id)) break;
       if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_TEXT) break;
       if (state.messages.some(x => x.id === data.id)) break;   // ignore replays
+      const text = cleanChatText(data.text, MAX_TEXT);
+      if (!text) break;
       addMessage({
-        id: data.id, text: data.text,
-        ts: Number.isFinite(data.ts) ? data.ts : Date.now(),
+        id: data.id, text,
+        ts: clampTs(data.ts),
         from: 'them', status: 'read', reply: cleanReply(data.reply)
       });
       send({ t: 'read', ids: [data.id] });
-      if (isEmojiOnly(data.text)) floatEmojiText(data.text);
+      if (isEmojiOnly(text)) floatEmojiText(text);
       haptic(8);
       break;
     }
@@ -1160,6 +1274,7 @@ function onSecureMessage(data) {
         break;
       }
       if (!takeToken(rxFile)) break;
+      if (state.recv) break;              // one transfer at a time, no mid-file swaps
       const mime = String(data.mime || '');
       state.recv = {
         chunks: [], got: 0, size,
@@ -1188,6 +1303,7 @@ function onSecureMessage(data) {
 
     case 'pl-add': {
       if (!takeToken(rxPl)) break;
+      if (!plAcceptSeq(data)) break;
       const added = plAddRemote(data.items);
       if (added) addSystem('📋 ' + state.partnerName + ' added ' + added +
         ' video' + (added > 1 ? 's' : '') + ' to the playlist');
@@ -1196,6 +1312,7 @@ function onSecureMessage(data) {
 
     case 'pl-remove': {
       if (!takeToken(rxPl)) break;
+      if (!plAcceptSeq(data)) break;
       const i = Math.floor(Number(data.i));
       if (!(i >= 0) || i >= state.playlist.length) break;
       state.playlist.splice(i, 1);
@@ -1207,6 +1324,7 @@ function onSecureMessage(data) {
 
     case 'pl-jump': {
       if (!takeToken(rxPl)) break;
+      if (!plAcceptSeq(data)) break;
       const i = Math.floor(Number(data.i));
       const it = state.playlist[i];
       if (!it) break;
@@ -1217,10 +1335,18 @@ function onSecureMessage(data) {
 
     case 'pl-clear': {
       if (!takeToken(rxPl)) break;
+      if (!plAcceptSeq(data)) break;
       state.playlist = [];
       state.plIndex = -1;
       renderPlaylistUI();
       addSystem('📋 ' + (state.partnerName || 'Partner') + ' cleared the playlist');
+      break;
+    }
+
+    case 'pl-ask': {
+      // The guest noticed a missing delta; the host answers with a snapshot.
+      if (state.role !== 'host' || !takeToken(rxPl)) break;
+      sendPlSync();
       break;
     }
 
@@ -1239,6 +1365,9 @@ function onSecureMessage(data) {
       state.playlist = list;
       const i = Math.floor(Number(data.i));
       state.plIndex = (i >= 0 && i < list.length) ? i : -1;
+      const sq = Number(data.seq);
+      if (Number.isFinite(sq) && sq > state.plRx) state.plRx = sq;
+      state.plAskAt = 0;
       renderPlaylistUI();
       break;
     }
@@ -1250,7 +1379,12 @@ function onChunk(data) {
   const u8 = data instanceof ArrayBuffer
     ? new Uint8Array(data)
     : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-
+  if (u8.byteLength > CHUNK_SIZE) {     // senders only ever slice 16 KB
+    state.recv = null;
+    hideTransfer();
+    toast('Transfer rejected');
+    return;
+  }
   // Never let a sender blow past the size it announced.
   if (state.recv.got + u8.byteLength > state.recv.size) {
     state.recv = null;
@@ -1888,7 +2022,7 @@ btnVoiceEnd.addEventListener('click', () => { haptic(10); closeVoice(true, 'Voic
    ROOM LIFECYCLE
    ========================================================= */
 function readUsername() {
-  return ($('#name-input').value || '').trim().slice(0, MAX_NAME);
+  return cleanDisplayName($('#name-input').value, MAX_NAME);
 }
 
 async function hostRoom() {
@@ -2350,10 +2484,7 @@ function shareMediaState() {
   } else if (state.mediaUrl) {
     send({ t: 'media-url', url: state.mediaUrl, name: state.mediaName });
   }
-  if (state.playlist.length) {
-    // guest adopts the host's list on (re)connect
-    send({ t: 'pl-sync', items: state.playlist.slice(0, MAX_PLAYLIST), i: state.plIndex });
-  }
+  sendPlSync();
   if (state.mediaLoaded) {
     const t = state.isYT ? (ytReady ? ytPlayer.getCurrentTime() : 0) : video.currentTime;
     const paused = state.isYT ? (!ytReady || ytPlayer.getPlayerState() !== 1) : video.paused;
@@ -2612,6 +2743,42 @@ function plValidateItems(items) {
   return out;
 }
 
+/* ---------- playlist deltas ----------
+   Both people edit the same list, so each side numbers its own outgoing
+   deltas. If a number goes missing (the peer's rate limiter dropped it), the
+   receiver asks the host for a snapshot instead of silently diverging. */
+function plNextSeq(obj) {
+  if (!state.secure) return false;      // never burn a sequence number while offline
+  obj.seq = ++state.plTx;
+  return send(obj);
+}
+
+function plAcceptSeq(data) {
+  const seq = Number(data.seq);
+  if (!data.seq || !Number.isFinite(seq)) return true;   // older build: no numbering
+  if (seq <= state.plRx) return false;                   // replay / already applied
+  if (seq > state.plRx + 1) {
+    // A delta went missing: the host answers with an authoritative snapshot,
+    // the guest asks for one. One request per 1.5 s, never in a tight loop.
+    if (!state.plAskAt || Date.now() - state.plAskAt > 1500) {
+      state.plAskAt = Date.now();
+      if (state.role === 'host') sendPlSync();
+      else send({ t: 'pl-ask' });
+    }
+    return false;
+  }
+  state.plRx = seq;
+  return true;
+}
+
+function sendPlSync() {
+  plNextSeq({
+    t: 'pl-sync',
+    items: state.playlist.slice(0, MAX_PLAYLIST),
+    i: state.plIndex
+  });
+}
+
 function plAddRemote(items) {
   const valid = plValidateItems(items);
   let added = 0;
@@ -2636,7 +2803,7 @@ function plAddLocal(items) {
   const before = state.playlist.length;
   const added = plAddRemote(items);
   if (!added) return false;
-  send({ t: 'pl-add', items: state.playlist.slice(before, before + added) });
+  plNextSeq({ t: 'pl-add', items: state.playlist.slice(before, before + added) });
   addSystem('📋 ' + added + ' video' + (added > 1 ? 's' : '') + ' added to the playlist');
   return true;
 }
@@ -2647,14 +2814,14 @@ function plRemoveLocal(i) {
   if (state.plIndex === i) state.plIndex = -1;
   else if (state.plIndex > i) state.plIndex--;
   renderPlaylistUI();
-  send({ t: 'pl-remove', i });
+  plNextSeq({ t: 'pl-remove', i });
 }
 
 function plClearLocal() {
   state.playlist = [];
   state.plIndex = -1;
   renderPlaylistUI();
-  send({ t: 'pl-clear' });
+  plNextSeq({ t: 'pl-clear' });
   addSystem('📋 Playlist cleared');
 }
 
@@ -2669,7 +2836,7 @@ function plJumpLocal(i) {
   state.localFile = null;
   state.mediaName = it.name;
   setMedia(it.url, it.name);
-  send({ t: 'pl-jump', i });
+  plNextSeq({ t: 'pl-jump', i });
   send({ t: 'media-url', url: it.url, name: it.name });
 }
 
@@ -2959,12 +3126,11 @@ function loadDirectLink(url, kind, name) {
 
 
 /* ----- file transfer ----- */
-const CHUNK_SIZE = 16 * 1024;
 
 async function sendFile(file) {
   if (state.sending || !state.secure) return;
   if (!file || file.size <= 0) return;
-  if (file.size > MAX_FILE_BYTES) { toast('File is too large to share (max 1.5 GB)'); return; }
+  if (file.size > MAX_FILE_BYTES) { toast('File is too large to share (max 512 MB)'); return; }
   state.sending = true;
 
   const total = file.size;
@@ -3968,7 +4134,7 @@ function openLinkSheet() {
 function onUrlGo() {
   const raw = ($('#url-input').value || '').trim();
   if (raw.length > MAX_URL) { toast('That link is too long'); return; }
-  const url = safeMediaUrl(raw);
+  const url = safeMediaUrl(raw, true);   // your own paste may be a local/LAN link
   if (!url) { toast('Enter a valid http(s) link'); return; }
   const kind = classifyUrl(url);
   if (kind === 'ytlist') { expandYouTubePlaylist(url); return; }
