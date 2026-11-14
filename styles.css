@@ -433,12 +433,15 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 
 /* --- controls --- */
 .controls{
-  position:absolute;left:0;right:0;bottom:0;padding:26px 10px 8px;
+  position:absolute;left:0;right:0;bottom:0;padding:24px 12px 8px;
+  display:flex;flex-direction:column;gap:2px;
   background:linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.35) 55%, transparent);
   opacity:1;transition:opacity .3s ease;
 }
 .video-wrap.idle .controls{opacity:0;pointer-events:none}
-.ctrl-row{display:flex;align-items:center;gap:8px}
+.scrub-row{display:flex;align-items:center;gap:8px;width:100%}
+.ctrl-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ctrl-group{display:flex;align-items:center;gap:6px}
 .ctrl-btn{
   width:32px;height:32px;display:grid;place-items:center;background:rgba(255,255,255,.14);
   border:1.5px solid rgba(255,255,255,.35);border-radius:50% 46% 54% 48%/48% 54% 46% 50%;
@@ -452,7 +455,7 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .ctrl-btn.sm svg{width:14px;height:14px}
 .time{font-size:10.5px;color:rgba(255,255,255,.85);font-variant-numeric:tabular-nums;font-weight:600;flex:0 0 auto;min-width:32px;text-align:center}
 
-.scrub{position:relative;flex:1 1 auto;height:26px;display:flex;align-items:center;touch-action:none;cursor:pointer}
+.scrub{position:relative;flex:1 1 auto;height:22px;display:flex;align-items:center;touch-action:none;cursor:pointer}
 .scrub-track{position:relative;width:100%;height:5px;background:rgba(255,255,255,.24);border-radius:3px;overflow:hidden}
 .scrub-fill{position:absolute;inset:0 auto 0 0;width:0%;background:var(--accent);border-radius:3px}
 .scrub-knob{
