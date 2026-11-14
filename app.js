@@ -51,12 +51,18 @@ const state = {
 };
 
 /* ---------- helpers ---------- */
-const uid = () => Math.random().toString(36).slice(2, 10);
+/* The room code is the only credential, so it comes from the CSPRNG — never
+   Math.random, whose V8 state can be reconstructed from a handful of outputs.
+   256 is an exact multiple of the 32-letter alphabet, so masking a random byte
+   with 31 stays perfectly uniform (no rejection loop needed). */
+const randBytes = n => crypto.getRandomValues(new Uint8Array(n));
+const uid = () => Array.from(randBytes(8), b => b.toString(16).padStart(2, '0')).join('');
 const haptic = (ms = 10) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
 
 function genCode() {
+  const bytes = randBytes(CODE_LEN);
   let s = '';
-  for (let i = 0; i < CODE_LEN; i++) s += ALPHA[Math.floor(Math.random() * ALPHA.length)];
+  for (let i = 0; i < CODE_LEN; i++) s += ALPHA[bytes[i] & 31];
   return s;
 }
 const formatCode = c => c.replace(/(.{4})(?=.)/g, '$1-');
@@ -351,6 +357,13 @@ const MAX_PLAYLIST   = 50;
 const MAX_PL_NAME    = 120;
 const HANDSHAKE_TIMEOUT = 15000;
 
+/* Voice is audible only after the call's DTLS fingerprint matches the one sent
+   over the authenticated data channel. These bound the window in which an
+   unverified call exists at all. */
+const VOICE_FP_POLL  = 250;
+const VOICE_FP_GRACE = 4000;    // peer fingerprint must arrive within this
+const VOICE_FP_MAX   = 15000;   // hard cap for the whole check
+
 const subtleCrypto = (window.crypto && window.crypto.subtle) || null;
 const textEnc = new TextEncoder();
 const textDec = new TextDecoder();
@@ -441,6 +454,7 @@ function takeToken(b, cost) {
   return true;
 }
 const rxBucket = makeBucket(40, 20);    // incoming control frames
+const rxHs     = makeBucket(8, 2);      // incoming handshake frames (own bucket)
 const rxVoice  = makeBucket(4, 0.2);    // incoming voice invitations
 const rxAnim   = makeBucket(6, 0.5);    // incoming reactions / emoji bursts
 const rxFile   = makeBucket(3, 0.05);   // incoming file offers
@@ -646,7 +660,7 @@ function initPeer(id) {
     let settled = false;
     let peer;
     try {
-      peer = new Peer(id, { debug: 1 });
+      peer = new Peer(id, { debug: 0 });
     } catch (e) { reject(e); return; }
 
     state.peer = peer;
@@ -859,7 +873,6 @@ function sendChunk(buf) {
    ========================================================= */
 function onData(conn, data) {
   if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) { onEncryptedChunk(conn, data); return; }
-  if (!takeToken(rxBucket)) return;
 
   let msg = data;
   if (typeof data === 'string') {
@@ -867,6 +880,15 @@ function onData(conn, data) {
     try { msg = JSON.parse(data); } catch (e) { return; }
   }
   if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
+
+  // Handshake frames use their own bucket: a burst of ordinary control frames
+  // must never be able to starve "key"/"auth" and fake a handshake timeout.
+  // "full" is a pre-handshake notice, so it costs nothing.
+  if (msg.t === 'key' || msg.t === 'auth') {
+    if (!takeToken(rxHs)) return;
+  } else if (msg.t !== 'full' && !takeToken(rxBucket)) {
+    return;
+  }
 
   switch (msg.t) {
     case 'key':
@@ -1039,7 +1061,9 @@ function onSecureMessage(data) {
       break;
 
     case 'voice-fp':
-      if (typeof data.fp === 'string') onVoiceFingerprint(data.fp);
+      // New builds send a set (an SDP may list several sha-256 fingerprints);
+      // a bare string is still accepted from an older peer.
+      onVoiceFingerprint(Array.isArray(data.fps) ? data.fps : data.fp);
       break;
 
     case 'chat': {
@@ -1257,8 +1281,8 @@ const voice = {
   inviteTimer: null,
   connectTimer: null,
   fpTimer: null,
-  myFp: '',
-  peerFp: '',
+  myFp: [],
+  peerFp: [],
   verified: false,
   audioCtx: null,
   analyser: null,
@@ -1305,8 +1329,21 @@ async function ensureMic() {
     video: false
   });
   voice.localStream = stream;
-  stream.getAudioTracks().forEach(t => { t.enabled = !voice.muted; });
+  applyVoiceGate();
   return stream;
+}
+
+/* Audio is gated in both directions until the call is verified: the mic track
+   stays disabled and the remote element stays muted. This is what stops a
+   relay that rewrites SDP from hearing (or playing) anything during the
+   fingerprint check. */
+function applyVoiceGate() {
+  if (voice.localStream) {
+    voice.localStream.getAudioTracks().forEach(t => {
+      t.enabled = voice.verified && !voice.muted;
+    });
+  }
+  try { voiceRemote.muted = !voice.verified; } catch (e) {}
 }
 
 function updateVoiceUI() {
@@ -1330,10 +1367,10 @@ function updateVoiceUI() {
   if (statusEl) {
     if (st === 'inviting') statusEl.textContent = 'Calling…';
     else if (st === 'active') {
-      if (voice.muted) statusEl.textContent = 'You are muted';
+      if (!voice.verified) statusEl.textContent = 'Securing voice…';
+      else if (voice.muted) statusEl.textContent = 'You are muted';
       else if (voice.peerMuted) statusEl.textContent = who + ' is muted';
-      else if (voice.verified) statusEl.textContent = '🔒 Encrypted · verified';
-      else statusEl.textContent = '🔒 Encrypted voice';
+      else statusEl.textContent = '🔒 Encrypted · verified';
     } else {
       statusEl.textContent = 'Connecting securely…';
     }
@@ -1375,6 +1412,9 @@ async function startVoiceInvite() {
   if (voice.status === 'active' || voice.status === 'connecting') { toggleVoiceMute(); return; }
   if (voice.status !== 'idle') return;
 
+  voice.verified = false;      // gate the mic before the device is even opened
+  voice.myFp = [];
+  voice.peerFp = [];
   try {
     await ensureMic();
   } catch (e) {
@@ -1386,9 +1426,6 @@ async function startVoiceInvite() {
 
   voice.muted = false;
   voice.peerMuted = false;
-  voice.verified = false;
-  voice.myFp = '';
-  voice.peerFp = '';
   voice.status = 'inviting';
   sendVoice({ t: 'voice-invite' });
   updateVoiceUI();
@@ -1415,6 +1452,9 @@ function askJoinVoice() {
 async function acceptVoiceInvite() {
   if (voice.status !== 'ringing') return;
 
+  voice.verified = false;      // gate the mic before the device is even opened
+  voice.myFp = [];
+  voice.peerFp = [];
   try {
     await ensureMic();
   } catch (e) {
@@ -1428,9 +1468,6 @@ async function acceptVoiceInvite() {
 
   voice.muted = false;
   voice.peerMuted = false;
-  voice.verified = false;
-  voice.myFp = '';
-  voice.peerFp = '';
   voice.status = 'connecting';
   sendVoice({ t: 'voice-accept' });
   updateVoiceUI();
@@ -1483,10 +1520,12 @@ function attachVoiceCall(call) {
     if (voice.call !== call) return;
     voice.remoteStream = stream;
     try {
+      voiceRemote.muted = true;      // stays silent until the fingerprint matches
       voiceRemote.srcObject = stream;
       const p = voiceRemote.play();
       if (p && p.catch) p.catch(() => {});
     } catch (e) {}
+    applyVoiceGate();                // keep the mic closed for the same reason
     clearTimeout(voice.connectTimer);
     voice.connectTimer = null;
     clearTimeout(voice.inviteTimer);
@@ -1532,8 +1571,8 @@ function onVoiceInvite() {
     voice.muted = false;
     voice.peerMuted = false;
     voice.verified = false;
-    voice.myFp = '';
-    voice.peerFp = '';
+    voice.myFp = [];
+    voice.peerFp = [];
     sendVoice({ t: 'voice-accept' });
     updateVoiceUI();
     armVoiceConnectTimeout();
@@ -1602,9 +1641,7 @@ function onVoiceBusy() {
 function toggleVoiceMute() {
   if (voice.status !== 'active' && voice.status !== 'connecting') return;
   voice.muted = !voice.muted;
-  if (voice.localStream) {
-    voice.localStream.getAudioTracks().forEach(t => { t.enabled = !voice.muted; });
-  }
+  applyVoiceGate();
   sendVoice({ t: 'voice-mute', m: voice.muted });
   haptic(10);
   updateVoiceUI();
@@ -1637,6 +1674,7 @@ function closeVoice(notify, message) {
     voice.remoteStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
     voice.remoteStream = null;
   }
+  try { voiceRemote.muted = true; } catch (e) {}
   try { voiceRemote.pause(); } catch (e) {}
   try { voiceRemote.srcObject = null; } catch (e) {}
 
@@ -1645,18 +1683,31 @@ function closeVoice(notify, message) {
   voice.muted = false;
   voice.peerMuted = false;
   voice.verified = false;
-  voice.myFp = '';
-  voice.peerFp = '';
+  voice.myFp = [];
+  voice.peerFp = [];
   voice.level = 0;
   if (voiceBar) voiceBar.style.setProperty('--level', '0');
   updateVoiceUI();
   if (message) toast(message);
 }
 
-/* ---------- DTLS fingerprint binding ---------- */
-function sdpFingerprint(sdp) {
-  const m = /a=fingerprint:sha-256\s+([0-9a-f:]+)/i.exec(sdp || '');
-  return m ? m[1].toUpperCase() : '';
+/* ---------- DTLS fingerprint binding ----------
+   The SDP may carry several sha-256 fingerprints, so the whole set is compared
+   rather than the first line. */
+function sdpFingerprints(sdp) {
+  const out = [];
+  const re = /a=fingerprint:sha-256\s+([0-9a-f:]+)/gi;
+  let m;
+  while ((m = re.exec(sdp || ''))) {
+    const v = m[1].toUpperCase();
+    if (out.indexOf(v) < 0) out.push(v);
+  }
+  return out;
+}
+
+function fpsMatch(mine, theirs) {
+  if (!mine.length || mine.length !== theirs.length) return false;
+  return mine.every(v => theirs.indexOf(v) >= 0);
 }
 
 function checkVoiceFingerprint() {
@@ -1664,16 +1715,16 @@ function checkVoiceFingerprint() {
   const pc = call && call.peerConnection;
   if (!pc) return false;
 
-  const local = pc.localDescription ? sdpFingerprint(pc.localDescription.sdp) : '';
-  const remote = pc.remoteDescription ? sdpFingerprint(pc.remoteDescription.sdp) : '';
+  const local = pc.localDescription ? sdpFingerprints(pc.localDescription.sdp) : [];
+  const remote = pc.remoteDescription ? sdpFingerprints(pc.remoteDescription.sdp) : [];
 
-  if (local && local !== voice.myFp) {
+  if (local.length && !fpsMatch(local, voice.myFp)) {
     voice.myFp = local;
-    sendVoice({ t: 'voice-fp', fp: local });
+    sendVoice({ t: 'voice-fp', fps: local });
   }
 
-  if (remote && voice.peerFp) {
-    if (remote !== voice.peerFp) {
+  if (remote.length && voice.peerFp.length) {
+    if (!fpsMatch(remote, voice.peerFp)) {
       clearInterval(voice.fpTimer); voice.fpTimer = null;
       addSystem('⚠️ Voice security check failed — call closed');
       closeVoice(true, 'Voice security check failed');
@@ -1681,12 +1732,13 @@ function checkVoiceFingerprint() {
     }
     if (!voice.verified) {
       voice.verified = true;
+      applyVoiceGate();          // only now does audio start flowing either way
       updateVoiceUI();
       addSystem('🎙️ Voice secured · DTLS fingerprint verified');
     }
     // Keep ticking until our own fingerprint has been sent too; otherwise the
     // peer can never verify us if its SDP was not ready on the first tick.
-    if (voice.myFp) {
+    if (voice.myFp.length) {
       clearInterval(voice.fpTimer); voice.fpTimer = null;
     }
     return true;
@@ -1694,34 +1746,44 @@ function checkVoiceFingerprint() {
   return false;
 }
 
-function onVoiceFingerprint(fp) {
-  const value = String(fp).trim();
-  if (!/^([0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(value)) return;
-  voice.peerFp = value.toUpperCase();
+function onVoiceFingerprint(fps) {
+  const list = (Array.isArray(fps) ? fps : [fps]).slice(0, 4)
+    .map(v => String(v).trim())
+    .filter(v => /^([0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(v))
+    .map(v => v.toUpperCase());
+  if (!list.length) return;
+  voice.peerFp = list;
   checkVoiceFingerprint();
 }
 
 function startVoiceFingerprintCheck() {
   clearInterval(voice.fpTimer);
   voice.fpTimer = null;
-  let tries = 0;
+  const started = Date.now();
   const tick = () => {
     if (voice.status !== 'active' && voice.status !== 'connecting') {
       clearInterval(voice.fpTimer); voice.fpTimer = null; return;
     }
     checkVoiceFingerprint();
-    if (++tries >= 60) {
+    if (voice.status !== 'active' && voice.status !== 'connecting') {
+      clearInterval(voice.fpTimer); voice.fpTimer = null; return;
+    }
+    if (voice.verified && voice.myFp.length) {
+      clearInterval(voice.fpTimer); voice.fpTimer = null; return;
+    }
+    const age = Date.now() - started;
+    // No fingerprint from the peer soon after media started = something is
+    // sitting between the two browsers. Close before any audio is audible.
+    if ((!voice.peerFp.length && age >= VOICE_FP_GRACE) || age >= VOICE_FP_MAX) {
       clearInterval(voice.fpTimer); voice.fpTimer = null;
-      if (!(voice.verified && voice.myFp)) {
-        addSystem('⚠️ Voice verification timed out — call closed');
-        closeVoice(true, 'Voice verification timed out');
-      }
+      addSystem('⚠️ Voice verification timed out — call closed');
+      closeVoice(true, 'Voice verification timed out');
     }
   };
   tick();
-  if (!(voice.verified && voice.myFp) &&
+  if (!voice.fpTimer &&
       (voice.status === 'active' || voice.status === 'connecting')) {
-    voice.fpTimer = setInterval(tick, 250);
+    voice.fpTimer = setInterval(tick, VOICE_FP_POLL);
   }
 }
 
@@ -1798,6 +1860,7 @@ function onIncomingCall(call) {
     toast('Could not answer the call');
     return;
   }
+  applyVoiceGate();
 
   voice.status = 'connecting';
   updateVoiceUI();
