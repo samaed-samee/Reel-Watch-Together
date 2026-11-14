@@ -78,6 +78,9 @@ input,textarea{user-select:text;-webkit-user-select:text;font-family:inherit}
   transition:transform .5s var(--ease), opacity .38s ease;
   will-change:transform,opacity;
 }
+/* will-change: transform traps position:fixed descendants inside .view/.app,
+   clipping fake-landscape on wide screens */
+body.fs-landscape .view:not(.hidden){will-change:auto}
 .view.hidden{transform:translateX(100%);opacity:0;pointer-events:none}
 .view.hidden.back{transform:translateX(-28%) scale(.96);opacity:0}
 
@@ -319,7 +322,7 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 }
 #video{width:100%;height:100%;object-fit:contain;display:block;background:#141210}
 /* how the picture sits inside the frame (set from the aspect sheet) */
-.video-wrap.ar-fill #video{object-fit:cover}
+.video-wrap.ar-fill #video{object-fit:fill}
 .video-wrap.ar-stretch #video{object-fit:fill}
 /* frame shapes: the player box itself takes this ratio */
 .video-wrap.frame-16-9{aspect-ratio:16/9}
@@ -385,14 +388,14 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 /* --- fullscreen (landscape) --- */
 .video-wrap:fullscreen,
 .video-wrap:-webkit-full-screen{
-  width:100vw;height:100vh;aspect-ratio:auto;
+  width:100vw;height:100vh;aspect-ratio:auto;margin:0;
   border:none;border-radius:0;box-shadow:none;background:#000;
 }
 .video-wrap:fullscreen #video,
 .video-wrap:-webkit-full-screen #video{object-fit:contain}
 .video-wrap:fullscreen.ar-fill #video,
 .video-wrap:-webkit-full-screen.ar-fill #video,
-.video-wrap.fake-landscape.ar-fill #video{object-fit:cover}
+.video-wrap.fake-landscape.ar-fill #video{object-fit:fill}
 .video-wrap:fullscreen.ar-stretch #video,
 .video-wrap:-webkit-full-screen.ar-stretch #video,
 .video-wrap.fake-landscape.ar-stretch #video{object-fit:fill}
@@ -404,7 +407,7 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   position:fixed;top:50%;left:50%;
   width:100vh;height:100vw;
   width:100dvh;height:100dvw;
-  max-width:none;aspect-ratio:auto;
+  max-width:none;aspect-ratio:auto;margin:0;
   border:none;border-radius:0;box-shadow:none;background:#000;
   z-index:9990;
   transform:translate(-50%,-50%) rotate(90deg);
@@ -679,6 +682,7 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   position:fixed;left:0;right:0;bottom:0;z-index:9001;background:var(--paper);
   border-top:2.5px solid var(--ink);border-radius:26px 26px 0 0;
   padding:10px 20px calc(var(--safe-b) + 22px);
+  max-height:90%;overflow-y:auto;overscroll-behavior:contain;
   transform:translateY(105%);transition:transform .42s var(--ease);
   box-shadow:0 -6px 0 rgba(27,24,21,.12);
 }

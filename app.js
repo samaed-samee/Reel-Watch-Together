@@ -1907,13 +1907,8 @@ function enterRoom(sysText) {
 function leaveRoom() {
   state.intentionalLeave = true;
   closeVoice(false);
-  // a browser fullscreen room shouldn't stay fullscreen on the home screen
-  if (appFullscreenEl()) {
-    try {
-      if (document.exitFullscreen) document.exitFullscreen();
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-    } catch (e) {}
-  }
+  // a fullscreen room shouldn't stay fullscreen on the home screen
+  exitFullscreen();
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
   state.reconnectAttempts = 0;
@@ -2378,7 +2373,7 @@ function openAspectSheet() {
       <div class="ar-chips">${ASPECT_FRAMES.map(f =>
         `<button class="ar-chip${a.frame === f.id ? ' on' : ''}" data-frame="${f.id}">${f.label}</button>`).join('')}</div>
     </div>
-    <p class="ar-note"><b>Fit</b> keeps the whole picture inside the frame (black bars), <b>Fill</b> crops the edges to fill it, <b>Stretch</b> may distort. <b>Frame</b> changes the shape of the player box itself — <b>Match video</b> uses the clip's own shape. Saved on this device; your partner keeps their own.</p>
+    <p class="ar-note"><b>Fit</b> keeps the original proportions (with black bars if needed), <b>Fill</b> fills every side of the frame while keeping the whole picture inside (nothing is cut off), <b>Stretch</b> stretches across the frame. <b>Frame</b> changes the shape of the player box itself — <b>Match video</b> uses the clip's own shape. Saved on this device; your partner keeps their own.</p>
     <button class="btn ghost" id="ar-reset">Reset to default</button>
   `);
 
@@ -3030,10 +3025,12 @@ function isFakeLandscape() { return videoWrap.classList.contains('fake-landscape
 function applyFakeLandscape() {
   videoWrap.classList.add('fake-landscape');
   document.body.classList.add('fs-landscape');
+  placeSheetForFullscreen();
 }
 function removeFakeLandscape() {
   videoWrap.classList.remove('fake-landscape');
   document.body.classList.remove('fs-landscape');
+  placeSheetForFullscreen();
 }
 
 async function enterFullscreen() {
@@ -3058,8 +3055,9 @@ async function enterFullscreen() {
 function exitFullscreen() {
   removeFakeLandscape();
   try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
+  if (!appFullscreenEl()) return;
   try {
-    if (document.exitFullscreen) document.exitFullscreen();
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
   } catch (e) {}
 }
@@ -3079,20 +3077,18 @@ $('#btn-change').addEventListener('click', e => {
   showControls();
   openMediaChooser();
 });
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) {
+function onFullscreenChange() {
+  if (!appFullscreenEl()) {
     removeFakeLandscape();
     try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
+  } else {
+    placeSheetForFullscreen();
   }
   showControls();
-});
-document.addEventListener('webkitfullscreenchange', () => {
-  if (!document.webkitFullscreenElement) {
-    removeFakeLandscape();
-    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
-  }
-  showControls();
-});
+  setTimeout(syncViewport, 250);
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 $('#btn-pick').addEventListener('click', () => { haptic(8); $('#file-input').click(); });
 
 /* Play one local file now and stream it to the partner (same as a single pick). */
@@ -3193,14 +3189,18 @@ function holdCancel() {
    ("Download video", "Copy video frame"…). The .video-hit layer already keeps
    the press off the media element; this is the belt-and-braces for browsers
    that still fire it on the wrapper. */
-videoWrap.addEventListener('contextmenu', e => e.preventDefault());
+videoWrap.addEventListener('contextmenu', e => {
+  if (!e.target.closest('.sheet')) e.preventDefault();
+});
 
 videoWrap.addEventListener('pointerdown', e => {
   if (holdPointer !== null || holdActive) return;
   if (!state.mediaLoaded || state.isYT || scrubbing) return;
   if (e.target.closest('.controls') || e.target.closest('.empty-stage') ||
       e.target.closest('.tap-play') || e.target.closest('.transfer') ||
-      e.target.closest('.fs-exit') || e.target.closest('.ar-btn')) return;
+      e.target.closest('.fs-exit') || e.target.closest('.ar-btn') ||
+      e.target.closest('.sheet') || e.target.closest('.sheet-backdrop') ||
+      e.target.closest('.dialog-backdrop')) return;
 
   // remember the press so pointerup can tell a tap from a hold / drag
   tapStart = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now() };
@@ -3714,9 +3714,13 @@ document.addEventListener('pointerdown', e => {
 const sheet = $('#sheet');
 const sheetBody = $('#sheet-body');
 const sheetBackdrop = $('#sheet-backdrop');
+const dlgBackdrop = $('#dialog-backdrop');
+const toastEl = $('#toast');
+const overlayHome = sheet.parentElement || document.body;
 
 function openSheet(html) {
   sheetBody.innerHTML = html;
+  placeSheetForFullscreen();
   sheetBackdrop.classList.add('show');
   sheet.classList.add('show');
 }
@@ -3724,6 +3728,20 @@ function closeSheet() {
   sheetBackdrop.classList.remove('show');
   sheet.classList.remove('show');
   plSheetOpen = false;
+}
+/* In player fullscreen the fullscreened .video-wrap is the only thing the
+   browser renders - sheets, dialogs and toasts parked outside it would be
+   invisible. So while the player is fullscreen (real or fake-landscape)
+   those overlays live inside it; everywhere else they live back in .app. */
+function placeSheetForFullscreen() {
+  const fsEl = appFullscreenEl();
+  const host = (fsEl === videoWrap || isFakeLandscape()) ? videoWrap : overlayHome;
+  if (sheet.parentElement !== host) {
+    host.appendChild(sheetBackdrop);
+    host.appendChild(sheet);
+    if (dlgBackdrop) host.appendChild(dlgBackdrop);
+    if (toastEl) host.appendChild(toastEl);
+  }
 }
 sheetBackdrop.addEventListener('click', closeSheet);
 
@@ -3902,9 +3920,6 @@ async function toggleAppFullscreen() {
   setTimeout(syncViewport, 300);
 }
 
-document.addEventListener('fullscreenchange', () => setTimeout(syncViewport, 250));
-document.addEventListener('webkitfullscreenchange', () => setTimeout(syncViewport, 250));
-
 /* ----- menu sheet ----- */
 $('#btn-menu').addEventListener('click', () => {
   haptic(8);
@@ -3977,7 +3992,6 @@ $('#code-chip').addEventListener('click', () => { haptic(8); copyCode(); });
 /* =========================================================
    CONFIRM DIALOG
    ========================================================= */
-const dlgBackdrop = $('#dialog-backdrop');
 let dlgResolve = null;
 
 function showDialog(opts = {}) {
