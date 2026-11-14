@@ -3114,9 +3114,11 @@ scrub.addEventListener('pointerup', e => {
 scrub.addEventListener('pointercancel', () => { scrubbing = false; });
 
 /* ----- buttons ----- */
-$('#btn-play').addEventListener('click', () => {
+function togglePlay() {
   if (!state.mediaLoaded) return;
   haptic(8);
+  $('#tap-play').classList.remove('show');
+  showControls();
   if (state.isYT) {
     if (!ytReady) return;
     if (ytPlayer.getPlayerState() === 1) ytPlayer.pauseVideo();
@@ -3124,7 +3126,8 @@ $('#btn-play').addEventListener('click', () => {
     return;
   }
   if (video.paused) video.play().catch(() => {}); else video.pause();
-});
+}
+$('#btn-play').addEventListener('click', togglePlay);
 $('#btn-plist').addEventListener('click', openPlaylistSheet);
 $('#tap-play').addEventListener('click', () => {
   $('#tap-play').classList.remove('show');
@@ -3428,6 +3431,29 @@ function toggleControls() {
   else hideControls();
 }
 $('#controls').addEventListener('pointerdown', () => showControls());
+
+/* ----- laptop keyboard shortcuts (Space = play/pause, Left/Right = ±10s) ----- */
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const tag = e.target && e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+      (e.target && e.target.isContentEditable)) return;
+  if (!inRoomView() || !state.mediaLoaded) return;
+  if (sheet.classList.contains('show') || dlgBackdrop.classList.contains('show')) return;
+
+  if (e.key === ' ' || e.code === 'Space') {
+    e.preventDefault();
+    if (!e.repeat) togglePlay();
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    showSkipPill(10, 'right');
+    skipLocal(10);
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    showSkipPill(-10, 'left');
+    skipLocal(-10);
+  }
+});
 
 /* =========================================================
    CHAT
