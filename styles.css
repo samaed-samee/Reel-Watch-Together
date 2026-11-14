@@ -322,8 +322,8 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 }
 #video{width:100%;height:100%;object-fit:contain;display:block;background:#141210}
 /* how the picture sits inside the frame (set from the aspect sheet) */
-.video-wrap.ar-fill #video{object-fit:fill}
-.video-wrap.ar-stretch #video{object-fit:fill}
+.video-wrap.ar-fill #video{object-fit:fill !important}
+.video-wrap.ar-stretch #video{object-fit:fill !important}
 /* frame shapes: the player box itself takes this ratio */
 .video-wrap.frame-16-9{aspect-ratio:16/9}
 .video-wrap.frame-4-3{aspect-ratio:4/3}
@@ -386,20 +386,27 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .video-wrap:not(.has-media) .controls{display:none}
 
 /* --- fullscreen (landscape) --- */
-.video-wrap:fullscreen,
-.video-wrap:-webkit-full-screen{
-  width:100vw;height:100vh;aspect-ratio:auto;margin:0;
+/* Keep :fullscreen and :-webkit-full-screen separate so an unknown vendor
+   pseudo-class never drops the standard rule. */
+.video-wrap:fullscreen{
+  width:100% !important;height:100% !important;
+  max-width:none !important;max-height:none !important;
+  aspect-ratio:auto !important;margin:0 !important;
   border:none;border-radius:0;box-shadow:none;background:#000;
 }
-.video-wrap:fullscreen #video,
-.video-wrap:-webkit-full-screen #video{object-fit:contain}
-.video-wrap:fullscreen.ar-fill #video,
-.video-wrap:-webkit-full-screen.ar-fill #video,
-.video-wrap.fake-landscape.ar-fill #video{object-fit:fill}
-.video-wrap:fullscreen.ar-stretch #video,
-.video-wrap:-webkit-full-screen.ar-stretch #video,
-.video-wrap.fake-landscape.ar-stretch #video{object-fit:fill}
-.video-wrap:fullscreen .controls,
+.video-wrap:-webkit-full-screen{
+  width:100% !important;height:100% !important;
+  max-width:none !important;max-height:none !important;
+  aspect-ratio:auto !important;margin:0 !important;
+  border:none;border-radius:0;box-shadow:none;background:#000;
+}
+.video-wrap:fullscreen.ar-fill #video{object-fit:fill !important}
+.video-wrap:-webkit-full-screen.ar-fill #video{object-fit:fill !important}
+.video-wrap.fake-landscape.ar-fill #video{object-fit:fill !important}
+.video-wrap:fullscreen.ar-stretch #video{object-fit:fill !important}
+.video-wrap:-webkit-full-screen.ar-stretch #video{object-fit:fill !important}
+.video-wrap.fake-landscape.ar-stretch #video{object-fit:fill !important}
+.video-wrap:fullscreen .controls{padding-bottom:calc(var(--safe-b) + 16px)}
 .video-wrap:-webkit-full-screen .controls{padding-bottom:calc(var(--safe-b) + 16px)}
 
 /* --- forced landscape (when orientation lock is unavailable, e.g. iOS) --- */
@@ -407,7 +414,8 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   position:fixed;top:50%;left:50%;
   width:100vh;height:100vw;
   width:100dvh;height:100dvw;
-  max-width:none;aspect-ratio:auto;margin:0;
+  max-width:none !important;max-height:none !important;
+  aspect-ratio:auto !important;margin:0 !important;
   border:none;border-radius:0;box-shadow:none;background:#000;
   z-index:9990;
   transform:translate(-50%,-50%) rotate(90deg);

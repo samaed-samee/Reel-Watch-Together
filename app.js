@@ -1941,6 +1941,7 @@ function leaveRoom() {
   try { video.load(); } catch (e) {}
   hideTransfer();
   closeSheet();
+  sampleVideoBars(true);
   clearReply();
   showHome();
   $('#code-input').value = '';
@@ -2268,6 +2269,7 @@ function setMedia(url, name) {
   state.mediaName = String(name || 'Movie').slice(0, MAX_MEDIA_NAME);
   state.mediaLoaded = true;
   videoWrap.classList.add('has-media');
+  sampleVideoBars(true);
   addSystem('🎬 ' + state.mediaName);
   if (isHlsUrl(url)) {
     attachHls(url);
@@ -2332,10 +2334,106 @@ function saveAspect() {
   try { localStorage.setItem(ASPECT_KEY, JSON.stringify(state.aspect)); } catch (e) {}
 }
 
+const BAR_SIZE = 96;
+let barCanvas = null;
+let barCtx = null;
+let videoBars = { l: 0, t: 0, samples: 0 };
+let lastBarSampleAt = 0;
+
+function applyFillTransform() {
+  if (state.aspect.mode !== 'fill') {
+    video.style.transform = '';
+    return;
+  }
+  video.style.objectFit = 'fill';
+  const sx = 1 / Math.max(0.4, 1 - 2 * videoBars.l);
+  const sy = 1 / Math.max(0.4, 1 - 2 * videoBars.t);
+  video.style.transform = (sx > 1.01 || sy > 1.01)
+    ? `scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`
+    : '';
+}
+
+function sampleVideoBars(reset) {
+  if (reset) {
+    videoBars = { l: 0, t: 0, samples: 0 };
+    lastBarSampleAt = 0;
+    applyFillTransform();
+    return;
+  }
+  if (state.isYT || !state.mediaLoaded || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+
+  if (!barCanvas) {
+    barCanvas = document.createElement('canvas');
+    barCanvas.width = BAR_SIZE;
+    barCanvas.height = BAR_SIZE;
+    barCtx = barCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (!barCtx) return;
+
+  let data;
+  try {
+    barCtx.drawImage(video, 0, 0, BAR_SIZE, BAR_SIZE);
+    data = barCtx.getImageData(0, 0, BAR_SIZE, BAR_SIZE).data;
+  } catch (e) {
+    return;
+  }
+
+  // Ignore dark/fade-to-black frames unless the center region has visible picture
+  let lit = 0;
+  for (let y = 24; y < 72; y++) {
+    for (let x = 24; x < 72; x++) {
+      const i = (y * BAR_SIZE + x) * 4;
+      if (Math.max(data[i], data[i + 1], data[i + 2]) > 22) lit++;
+    }
+  }
+  if (lit / (48 * 48) < 0.15) return;
+
+  const isBlackCol = x => {
+    let dark = 0;
+    for (let y = 10; y <= 85; y++) {
+      const i = (y * BAR_SIZE + x) * 4;
+      if (Math.max(data[i], data[i + 1], data[i + 2]) <= 18) dark++;
+    }
+    return dark / 76 >= 0.95;
+  };
+  const isBlackRow = y => {
+    let dark = 0;
+    for (let x = 10; x <= 85; x++) {
+      const i = (y * BAR_SIZE + x) * 4;
+      if (Math.max(data[i], data[i + 1], data[i + 2]) <= 18) dark++;
+    }
+    return dark / 76 >= 0.95;
+  };
+
+  let l = 0, r = 0, t = 0, b = 0;
+  while (l <= 26 && isBlackCol(l)) l++;
+  while (r <= 26 && isBlackCol(BAR_SIZE - 1 - r)) r++;
+  while (t <= 26 && isBlackRow(t)) t++;
+  while (b <= 26 && isBlackRow(BAR_SIZE - 1 - b)) b++;
+
+  let lr = Math.min(l, r) / BAR_SIZE;
+  let tb = Math.min(t, b) / BAR_SIZE;
+  lr = lr >= 0.015 ? Math.min(0.28, lr + 0.005) : 0;
+  tb = tb >= 0.015 ? Math.min(0.28, tb + 0.005) : 0;
+
+  if (videoBars.samples === 0) {
+    videoBars.l = lr;
+    videoBars.t = tb;
+  } else {
+    videoBars.l = Math.min(videoBars.l, lr);
+    videoBars.t = Math.min(videoBars.t, tb);
+  }
+  videoBars.samples++;
+  applyFillTransform();
+}
+
 function applyAspect() {
   const a = state.aspect;
   videoWrap.classList.toggle('ar-fill', a.mode === 'fill');
   videoWrap.classList.toggle('ar-stretch', a.mode === 'stretch');
+  video.style.objectFit = (a.mode === 'fill' || a.mode === 'stretch') ? 'fill' : 'contain';
+  applyFillTransform();
+  if (a.mode === 'fill' && videoBars.samples === 0) sampleVideoBars();
   ASPECT_FRAMES.forEach(f => videoWrap.classList.toggle('frame-' + f.id, a.frame === f.id));
   videoWrap.classList.remove('frame-tall');
   if (a.frame === 'auto') updateAutoFrame();
@@ -2345,6 +2443,11 @@ function applyAspect() {
 /* "Match video": the player box copies the clip's own shape. */
 function updateAutoFrame() {
   if (state.aspect.frame !== 'auto') return;
+  if (appFullscreenEl() === videoWrap || isFakeLandscape()) {
+    videoWrap.style.aspectRatio = '';
+    videoWrap.classList.remove('frame-tall');
+    return;
+  }
   const w = video.videoWidth | 0, h = video.videoHeight | 0;
   if (w > 0 && h > 0) {
     videoWrap.style.aspectRatio = w + ' / ' + h;
@@ -2356,6 +2459,16 @@ function updateAutoFrame() {
 }
 video.addEventListener('loadedmetadata', updateAutoFrame);
 video.addEventListener('resize', updateAutoFrame);
+video.addEventListener('loadeddata', () => sampleVideoBars());
+video.addEventListener('seeked', () => sampleVideoBars());
+video.addEventListener('play', () => sampleVideoBars());
+video.addEventListener('timeupdate', () => {
+  if (state.aspect.mode !== 'fill' || videoBars.samples >= 15) return;
+  const now = Date.now();
+  if (now - lastBarSampleAt < 1200) return;
+  lastBarSampleAt = now;
+  sampleVideoBars();
+});
 
 function openAspectSheet() {
   haptic(8);
@@ -3025,11 +3138,13 @@ function isFakeLandscape() { return videoWrap.classList.contains('fake-landscape
 function applyFakeLandscape() {
   videoWrap.classList.add('fake-landscape');
   document.body.classList.add('fs-landscape');
+  updateAutoFrame();
   placeSheetForFullscreen();
 }
 function removeFakeLandscape() {
   videoWrap.classList.remove('fake-landscape');
   document.body.classList.remove('fs-landscape');
+  updateAutoFrame();
   placeSheetForFullscreen();
 }
 
@@ -3082,6 +3197,7 @@ function onFullscreenChange() {
     removeFakeLandscape();
     try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
   } else {
+    updateAutoFrame();
     placeSheetForFullscreen();
   }
   showControls();

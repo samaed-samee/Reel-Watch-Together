@@ -5,12 +5,12 @@
    Bump VERSION whenever you ship changed app files, or the old
    shell keeps coming back from the cache.
    ========================================================= */
-const VERSION = 'reel-shell-v12';
+const VERSION = 'reel-shell-v14';
 const SHELL = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './styles.css?v=14',
+  './app.js?v=14',
   './boot.js',
   './manifest.json',
   './icons/icon-192.png',
@@ -54,19 +54,17 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Same-origin assets: cache first, refresh in the background.
+  // Same-origin assets: network first so updates apply right away,
+  // falling back to cache when offline.
   e.respondWith(
-    caches.match(e.request).then(hit => {
-      const net = fetch(e.request)
-        .then(res => {
-          if (res && res.ok) {
-            const copy = res.clone();
-            caches.open(VERSION).then(c => c.put(e.request, copy));
-          }
-          return res;
-        })
-        .catch(() => hit);
-      return hit || net;
-    })
+    fetch(e.request)
+      .then(res => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(VERSION).then(c => c.put(e.request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
