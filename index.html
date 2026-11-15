@@ -23,7 +23,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="vendor/peer.min.js"></script>
-<link rel="stylesheet" href="styles.css?v=24">
+<link rel="stylesheet" href="styles.css?v=26">
 </head>
 <body>
 
@@ -216,10 +216,13 @@
     </div>
 
     <div class="chat-wrap">
-      <div class="chat" id="chat"></div>
-      <div class="typing-ind" id="typing-ind">
-        <span class="typing-dots"><i></i><i></i><i></i></span>
-        <span id="typing-text">typing</span>
+      <div class="chat" id="chat">
+        <!-- lives as the LAST row of the message list: it scrolls with the
+             messages and always appears on the line under the newest bubble -->
+        <div class="typing-ind" id="typing-ind">
+          <span class="typing-dots"><i></i><i></i><i></i></span>
+          <span id="typing-text">typing</span>
+        </div>
       </div>
     </div>
 
@@ -282,6 +285,6 @@
   <div id="toast"></div>
 </div>
 
-<script src="app.js?v=24"></script>
+<script src="app.js?v=26"></script>
 </body>
 </html>

@@ -371,6 +371,9 @@ function showHome() {
 function showRoomView() {
   viewHome.classList.add('hidden', 'back');
   viewRoom.classList.remove('hidden', 'back');
+  // an install banner that slipped in on the home screen must not sit over
+  // the room header (leave button, code chip) or the player once inside
+  hideInstallBanner();
   viewRoom.classList.remove('enter');
   void viewRoom.offsetWidth;
   viewRoom.classList.add('enter');
@@ -2160,7 +2163,7 @@ async function joinRoom(rawCode) {
 function enterRoom(sysText) {
   closeVoice(false);
   $('#code-text').textContent = formatCode(state.code);
-  chat.innerHTML = '';
+  clearChat();
   state.messages = [];
   state.mediaLoaded = false;
   state.localFile = null;
@@ -2208,7 +2211,7 @@ function leaveRoom() {
   state.partnerClientId = '';
   state.partnerPeerId = '';
   state.messages = [];
-  chat.innerHTML = '';
+  clearChat();
   destroyYouTube();
   revokeBlob();
   state.mediaLoaded = false;
@@ -3895,11 +3898,24 @@ document.addEventListener('keydown', e => {
 const TICK1 = '<svg class="tick" viewBox="0 0 18 12"><path d="M1.5 6.5l3.6 3.6L12 3"/></svg>';
 const TICK2 = '<svg class="tick" viewBox="0 0 22 12"><path d="M1.5 6.5l3.6 3.6L12 3"/><path d="M8 9.4l1.2 1.2L20.5 3"/></svg>';
 
+/* messages always land ABOVE the typing pill: the pill is the last row of
+   the list and must stay there */
+function chatAppend(el) {
+  if (typingInd.parentElement === chat) chat.insertBefore(el, typingInd);
+  else chat.appendChild(el);
+}
+
+/* wipes the messages but keeps the typing pill node alive (chat.innerHTML
+   would destroy it, and a detached pill would never show again) */
+function clearChat() {
+  while (chat.firstChild !== typingInd && chat.firstChild) chat.removeChild(chat.firstChild);
+}
+
 function addSystem(text) {
   const el = document.createElement('div');
   el.className = 'sys';
   el.textContent = text;
-  chat.appendChild(el);
+  chatAppend(el);
   scrollChat(true);
 }
 
@@ -3963,7 +3979,7 @@ function addMessage(m) {
   bubble.appendChild(text);
   bubble.appendChild(meta);
   el.appendChild(bubble);
-  chat.appendChild(el);
+  chatAppend(el);
 
   attachGestures(el, bubble, m);
   if (m.reactions.length) renderReactions(m);
@@ -4246,6 +4262,7 @@ function showRemoteTyping(on) {
     const label = $('#typing-text');
     if (label) label.textContent = (state.partnerName || 'Partner') + ' is typing';
     typingInd.classList.add('show');
+    scrollChat(false);   // follow the new last row when already near the bottom
     state.remoteTypingTimer = setTimeout(() => typingInd.classList.remove('show'), 2600);
   } else {
     typingInd.classList.remove('show');
