@@ -212,6 +212,15 @@ What survives a reconnect:
 - Playlist numbering restarts for the new session, and the host immediately sends a fresh snapshot; the list, the playing item and the playback position are restored.
 - A new handshake means a **new safety code** — compare it again after a reconnect.
 
+### What survives a page reload
+
+A refresh (or closing and reopening the tab in the same session) rejoins the same room automatically. What comes back:
+
+- The **host** keeps the playlist, the playing item and the playback position — the host is the playlist's source of truth, so without this a host refresh would drop them. The snapshot lives in `sessionStorage`, scoped to the room code: it survives a reload but **dies with the tab**, so nothing about the watch history is left on disk once the browser closes. It is also erased when you leave the room or open another one, and the list is re-validated with the same rules as data arriving over the network before anything is restored.
+- The **guest** recovers from the host, exactly as on a reconnect — it never keeps its own copy.
+- A **local file** cannot come back on the device that picked it (the browser does not persist picked files across a reload): the host re-picks it; a guest just refreshes and receives it again automatically, because the host re-sends it after the handshake.
+- Chat history is not persisted: a reload starts with an empty chat (unacknowledged messages are still re-sent to the partner).
+
 ### Voice calls
 
 Voice is a separate WebRTC media stream, so it is not squeezed through the encrypted data channel:
@@ -276,6 +285,7 @@ Voice calls get a second, automatic check. Both browsers send their local **DTLS
 - **Fail-closed** — a failed handshake closes the connection and blocks automatic reconnection instead of silently retrying.
 - **No `innerHTML` with remote content** — all peer-supplied text is rendered with `textContent`.
 - **Microphone is opt-in** — the browser permission prompt appears only when you start or accept a call, and every track is stopped when the call ends, the connection drops or the page is unloaded.
+- **Watch history is not kept on disk.** The host's playlist snapshot that makes a refresh recoverable lives in `sessionStorage` for that room only — it dies with the tab, is erased when you leave the room or open another one, and is never transmitted anywhere except the encrypted channel to your partner.
 
 ---
 
@@ -441,7 +451,7 @@ HLS (`.m3u8`) plays natively in Safari and via hls.js (loaded on demand from `ve
 - This is a client-only app: there is **no account system, database or file storage** anywhere. Reloading a room recreates it.
 - Media links must be publicly reachable by your partner; local files are sent peer-to-peer instead.
 - Reconnects are automatic. Each one performs a fresh handshake and generates a **new safety code** — compare it again.
-- Chat, reactions and the playlist are kept across a reconnect; the movie position is restored by the host.
+- Chat, reactions and the playlist are kept across a reconnect; the movie position is restored by the host. A host **page refresh** also keeps the playlist, the playing item and the position (see [What survives a page reload](#what-survives-a-page-reload)).
 - Voice calls are direct browser-to-browser. If one network blocks peer-to-peer media (strict corporate NAT/firewall), the call cannot connect; Reel deliberately does not route audio through a third-party TURN server.
 
 ---

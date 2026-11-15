@@ -248,7 +248,7 @@ function ytEmbedSrc(id, host) {
 /* Build the <iframe> ourselves so the referrer policy is applied *before* the
    player makes its first request. If the request reaches YouTube without a
    Referer it answers "player configuration error 153". */
-function mountYTPlayer(id, name, useNoCookie) {
+function mountYTPlayer(id, name, useNoCookie, startAt) {
   const host = useNoCookie ? 'https://www.youtube-nocookie.com' : 'https://www.youtube.com';
   ytStage.innerHTML = '';
 
@@ -270,6 +270,8 @@ function mountYTPlayer(id, name, useNoCookie) {
         timeDur.textContent = fmtDur(player.getDuration());
         paintScrub();
         updatePlayIcon();
+        // resumed session: continue where the movie stopped, then play
+        if (startAt > 0) { try { player.seekTo(startAt, true); } catch (e) {} }
         player.playVideo();
         setTimeout(() => {
           if (ytReady && ytPlayer === player && player.getPlayerState() !== 1) {
@@ -285,7 +287,7 @@ function mountYTPlayer(id, name, useNoCookie) {
         if (code === 153 && useNoCookie && !ytRetried) {
           ytRetried = true;
           console.warn('YouTube 153 on youtube-nocookie.com — retrying on www.youtube.com');
-          mountYTPlayer(id, name, false);
+          mountYTPlayer(id, name, false, startAt);
           return;
         }
         if (code === 153) {
@@ -319,7 +321,7 @@ function destroyYouTube() {
   setRate(1, false);
 }
 
-async function loadYouTube(id, name) {
+async function loadYouTube(id, name, startAt) {
   setRate(1, false);
   state.isYT = true;
   state.ytId = id;
@@ -344,7 +346,7 @@ async function loadYouTube(id, name) {
   if (!window.YT || !window.YT.Player) { toast('Could not load YouTube player'); return; }
 
   ytRetried = false;
-  mountYTPlayer(id, name, true);
+  mountYTPlayer(id, name, true, startAt);
 }
 
 function onYTState(e) {
@@ -2093,6 +2095,7 @@ async function hostRoom() {
   }
   state.code = code;
   ensureClientId();
+  plClearSaved();          // a new room never inherits another room's list
   saveSession();
   enterRoom('Room created · share the code');
 }
@@ -2118,6 +2121,7 @@ async function joinRoom(rawCode) {
 
   state.code = code;
   ensureClientId();
+  plClearSaved();          // a guest never carries a host snapshot anyway
   saveSession();
   enterRoom('Joining room…');
 
@@ -2164,6 +2168,7 @@ function leaveRoom() {
   hiddenSince = 0;
   destroyPeer();
   clearSession();
+  plClearSaved();          // leaving the room erases the saved watch list
   state.role = null;
   state.code = '';
   state.username = '';
@@ -2408,6 +2413,7 @@ async function resumeSession() {
       return false;
     }
     enterRoom('Room restored · share the code');
+    plRestoreSaved();        // bring back the playlist and what was playing
     setStatus('waiting', 'Waiting for partner…');
     return true;
   }
@@ -2492,7 +2498,7 @@ function revokeBlob() {
   state.blobUrl = null;
 }
 
-function setMedia(url, name) {
+function setMedia(url, name, startAt) {
   const ytId = parseYouTube(url);
   const isBlob = /^blob:/i.test(url);
 
@@ -2505,7 +2511,7 @@ function setMedia(url, name) {
   if (ytId) {
     destroyHls();
     state.mediaUrl = url;
-    loadYouTube(ytId, name);
+    loadYouTube(ytId, name, startAt);
     return;
   }
 
@@ -2522,13 +2528,22 @@ function setMedia(url, name) {
   sampleVideoBars(true);
   addSystem('🎬 ' + state.mediaName);
   if (isHlsUrl(url)) {
-    attachHls(url);
+    attachHls(url);          // HLS is usually live — a start offset makes no sense
     return;
   }
   video.src = url;
   video.load();
+  if (startAt > 0) seekLoadedVideo(video, startAt);
   // try autoplay (may be blocked)
   video.play().catch(() => { $('#tap-play').classList.add('show'); });
+}
+
+/* Jump to a start position once the browser knows the stream layout
+   (currentTime cannot be set before the metadata has arrived). */
+function seekLoadedVideo(el, t) {
+  const seek = () => { try { el.currentTime = t; } catch (e) {} };
+  if (el.readyState >= 1) seek();
+  else el.addEventListener('loadedmetadata', seek, { once: true });
 }
 
 function shareMediaState() {
@@ -2796,6 +2811,67 @@ function plValidateItems(items) {
   return out;
 }
 
+/* ---------- playlist persistence (sessionStorage) ----------
+   The host is the playlist's source of truth, so a host reload used to drop
+   the list (a guest recovers FROM the host, never the other way around).
+   Keeping a snapshot in sessionStorage fixes that: it survives a reload, but
+   it dies with the tab, so nothing about the watch history stays on disk
+   once the browser closes. It is scoped to the room code, validated with the
+   same rules as data arriving over the network, and wiped when the room is
+   left or a new one is opened. The guest never reads or writes it — its
+   state always comes from the host's pl-sync snapshot. */
+const PL_KEY = 'reel.playlist';
+const PL_MAX_AGE = 12 * 60 * 60 * 1000;   // ignore snapshots older than 12 h
+
+function plSaveState() {
+  try {
+    if (state.role !== 'host') return;
+    if (!state.playlist.length) { sessionStorage.removeItem(PL_KEY); return; }
+    let t = 0;
+    if (state.isYT) { if (ytReady) t = ytPlayer.getCurrentTime(); }
+    else if (state.mediaLoaded) t = video.currentTime;
+    sessionStorage.setItem(PL_KEY, JSON.stringify({
+      code: state.code,
+      at: Date.now(),
+      i: state.plIndex,
+      t: Math.min(Math.max(Number(t) || 0, 0), 7 * 24 * 3600),
+      items: state.playlist.slice(0, MAX_PLAYLIST),
+    }));
+  } catch (e) {}
+}
+
+function plLoadState() {
+  try {
+    const s = JSON.parse(sessionStorage.getItem(PL_KEY) || 'null');
+    if (!s || s.code !== state.code) return null;
+    if (!Number.isFinite(s.at) || Date.now() - s.at > PL_MAX_AGE) return null;
+    const items = plValidateItems(s.items);
+    if (!items.length) return null;
+    const i = Math.floor(Number(s.i));
+    const t = Math.min(Math.max(Number(s.t) || 0, 0), 7 * 24 * 3600);
+    return { items, i: (i >= 0 && i < items.length) ? i : -1, t };
+  } catch (e) { return null; }
+}
+
+function plClearSaved() {
+  try { sessionStorage.removeItem(PL_KEY); } catch (e) {}
+}
+
+function plRestoreSaved() {
+  if (state.role !== 'host') return;
+  const saved = plLoadState();
+  if (!saved) return;
+  state.playlist = saved.items;
+  state.plIndex = saved.i;
+  renderPlaylistUI();
+  if (saved.i >= 0) {
+    const it = saved.items[saved.i];
+    state.localQueue = [];
+    setMedia(it.url, it.name, saved.t);
+  }
+  addSystem('📋 Playlist restored (' + saved.items.length + ')');
+}
+
 /* ---------- playlist deltas ----------
    Both people edit the same list, so each side numbers its own outgoing
    deltas. If a number goes missing (the peer's rate limiter dropped it), the
@@ -2910,10 +2986,25 @@ video.addEventListener('ended', () => {
   plAdvanceMaybe();
 });
 
+/* keep the snapshot's playback position fresh, so a refresh resumes close to
+   where the movie stopped. timeupdate fires ~4x/s — plSaveSoon throttles it
+   to one write per 10 s; pause/seek are saved immediately because they are
+   exactly the moments a user would refresh at. */
+let plLastSave = 0;
+function plSaveSoon() {
+  if (Date.now() - plLastSave < 10000) return;
+  plLastSave = Date.now();
+  plSaveState();
+}
+video.addEventListener('timeupdate', plSaveSoon);
+video.addEventListener('pause', () => { plLastSave = 0; plSaveState(); });
+video.addEventListener('seeked', () => { plLastSave = 0; plSaveState(); });
+
 /* ----- playlist sheet ----- */
 let plSheetOpen = false;
 
 function renderPlaylistUI() {
+  plSaveState();      // host-only inside; keeps the room snapshot current
   if (plSheetOpen) renderPlaylistSheet();
 }
 
@@ -3332,6 +3423,7 @@ setInterval(() => {
   if (state.isYT && ytReady && state.mediaLoaded && !scrubbing) {
     paintScrub();
     updatePlayIcon();
+    if (state.role === 'host' && state.playlist.length) plSaveSoon();
     // YouTube reports "ended" (state 0) with no DOM event we can catch
     if (ytPlayer.getPlayerState() === 0 && Date.now() > state.suppressUntil) plAdvanceMaybe();
   }
