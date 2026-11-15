@@ -327,6 +327,7 @@ async function loadYouTube(id, name, startAt) {
   state.ytId = id;
   state.mediaLoaded = true;
   state.mediaName = name || 'YouTube video';
+  plSaveState();   // snapshot the YT load immediately (no timeupdate event exists)
   videoWrap.classList.add('has-media', 'is-yt');
   $('#tap-play').classList.remove('show');
   hideTransfer();
@@ -2524,6 +2525,7 @@ function setMedia(url, name, startAt) {
   state.mediaUrl = isBlob ? null : url;
   state.mediaName = String(name || 'Movie').slice(0, MAX_MEDIA_NAME);
   state.mediaLoaded = true;
+  plSaveState();   // the moment media is on screen, the room snapshot is live
   videoWrap.classList.add('has-media');
   sampleVideoBars(true);
   addSystem('🎬 ' + state.mediaName);
@@ -2826,7 +2828,10 @@ const PL_MAX_AGE = 12 * 60 * 60 * 1000;   // ignore snapshots older than 12 h
 function plSaveState() {
   try {
     if (state.role !== 'host') return;
-    if (!state.playlist.length) { sessionStorage.removeItem(PL_KEY); return; }
+    if (!state.playlist.length && !state.mediaUrl) {
+      sessionStorage.removeItem(PL_KEY);
+      return;
+    }
     let t = 0;
     if (state.isYT) { if (ytReady) t = ytPlayer.getCurrentTime(); }
     else if (state.mediaLoaded) t = video.currentTime;
@@ -2836,6 +2841,10 @@ function plSaveState() {
       i: state.plIndex,
       t: Math.min(Math.max(Number(t) || 0, 0), 7 * 24 * 3600),
       items: state.playlist.slice(0, MAX_PLAYLIST),
+      // the playing item even when nothing was queued: a pasted link played
+      // directly never enters the playlist, but a refresh must still keep it
+      mediaUrl: state.mediaUrl || null,
+      mediaName: state.mediaName || '',
     }));
   } catch (e) {}
 }
@@ -2846,10 +2855,17 @@ function plLoadState() {
     if (!s || s.code !== state.code) return null;
     if (!Number.isFinite(s.at) || Date.now() - s.at > PL_MAX_AGE) return null;
     const items = plValidateItems(s.items);
-    if (!items.length) return null;
+    // the host's own paste may point at a LAN address, so allowPrivate matches
+    // the permission the link had when it was played
+    const mediaUrl = safeMediaUrl(s.mediaUrl, true);
+    if (!items.length && !mediaUrl) return null;
     const i = Math.floor(Number(s.i));
     const t = Math.min(Math.max(Number(s.t) || 0, 0), 7 * 24 * 3600);
-    return { items, i: (i >= 0 && i < items.length) ? i : -1, t };
+    return {
+      items, i: (i >= 0 && i < items.length) ? i : -1, t,
+      mediaUrl,
+      mediaName: typeof s.mediaName === 'string' ? s.mediaName.slice(0, MAX_MEDIA_NAME) : '',
+    };
   } catch (e) { return null; }
 }
 
@@ -2864,12 +2880,16 @@ function plRestoreSaved() {
   state.playlist = saved.items;
   state.plIndex = saved.i;
   renderPlaylistUI();
-  if (saved.i >= 0) {
-    const it = saved.items[saved.i];
+  // the playing item wins: a directly played link that was never queued
+  // must come back just like a playlist item would
+  const url = saved.mediaUrl || (saved.i >= 0 ? saved.items[saved.i].url : null);
+  if (url) {
+    const name = saved.mediaName ||
+      (saved.i >= 0 && saved.items[saved.i] ? saved.items[saved.i].name : '');
     state.localQueue = [];
-    setMedia(it.url, it.name, saved.t);
+    setMedia(url, name, saved.t);
   }
-  addSystem('📋 Playlist restored (' + saved.items.length + ')');
+  if (saved.items.length) addSystem('📋 Playlist restored (' + saved.items.length + ')');
 }
 
 /* ---------- playlist deltas ----------
@@ -3423,7 +3443,7 @@ setInterval(() => {
   if (state.isYT && ytReady && state.mediaLoaded && !scrubbing) {
     paintScrub();
     updatePlayIcon();
-    if (state.role === 'host' && state.playlist.length) plSaveSoon();
+    if (state.role === 'host' && state.mediaLoaded) plSaveSoon();
     // YouTube reports "ended" (state 0) with no DOM event we can catch
     if (ytPlayer.getPlayerState() === 0 && Date.now() > state.suppressUntil) plAdvanceMaybe();
   }
