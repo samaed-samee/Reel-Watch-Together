@@ -935,9 +935,51 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
   .feature-row{padding-top:8px}
 }
 
+/* tablets+ and desktop windows: the home screen stays a centered
+   phone-style column, sheets center instead of touching both edges */
 @media (min-width:640px){
-  .app{max-width:460px;margin:0 auto;border-left:2px solid rgba(27,24,21,.14);border-right:2px solid rgba(27,24,21,.14)}
   .sheet{max-width:460px;margin:0 auto;left:0;right:0}
+  #view-home{
+    max-width:520px;margin:0 auto;
+    border-left:2px solid rgba(27,24,21,.14);
+    border-right:2px solid rgba(27,24,21,.14);
+  }
+}
+
+/* ============ DESKTOP: video left, chat right ============
+   The room becomes a two-pane layout: the player fills the whole left
+   side edge-to-edge (black letterbox, no frame), while the chat column
+   — header, messages, voice bar, composer — keeps the paper style on
+   the right. Pure CSS: the same DOM is placed with grid areas, so no
+   JS knows about the split. Below 900px everything stays mobile. */
+@media (min-width:900px){
+  #view-room{
+    display:grid;
+    grid-template-columns:1fr clamp(340px, 30vw, 440px);
+    grid-template-rows:auto 1fr auto auto;
+    grid-template-areas:
+      "stage header"
+      "stage chat"
+      "stage voice"
+      "stage composer";
+  }
+  #view-room > *{min-width:0;min-height:0}
+  .room-header{
+    grid-area:header;padding:12px 14px 9px;
+    border-bottom:2px solid rgba(27,24,21,.14);
+  }
+  .stage{grid-area:stage;height:100%;padding:0}
+  #view-room .video-wrap{
+    width:100% !important;height:100% !important;aspect-ratio:auto !important;
+    border:none;border-radius:0;box-shadow:none;
+  }
+  .chat-wrap{grid-area:chat}
+  .chat{padding:10px 14px 2px}
+  .voice-bar{grid-area:voice}
+  .composer{grid-area:composer;padding:8px 12px 12px}
+  /* the chat-emoji panel is absolutely positioned against the whole view;
+     pin it over the chat column instead (same clamp as the column) */
+  #view-room .emoji-panel{left:auto;right:12px;width:clamp(340px, 30vw, 440px)}
 }
 
 @media (max-width:400px){

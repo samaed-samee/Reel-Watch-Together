@@ -41,6 +41,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 | 🔐 **End-to-end encryption** | Authenticated ECDH + HKDF + AES-GCM-256, plus a 6-digit safety code to detect a man-in-the-middle. |
 | 👥 **Rooms of exactly two** | The host accepts one guest; anyone else is turned away. A returning partner replaces their own stale socket. |
 | 📱 **Mobile-first** | Safe-area aware, keyboard-aware composer, fullscreen with landscape lock. Room options also has a browser-only **Fullscreen** toggle that hides the browser toolbar. |
+| 🖥️ **Desktop layout** | On wide screens (≥900px) the room splits in two panes: the player fills the whole left side edge-to-edge, and the chat — room code, messages, voice, composer — keeps the paper style in a column on the right. Below that width the mobile layout is unchanged. |
 | 📲 **Installable (PWA)** | One-tap install to the home screen: standalone window, custom app icon and an offline app shell. |
 
 ---
