@@ -18,6 +18,7 @@ const state = {
   peer: null,
   conn: null,
   connected: false,
+  everConnected: false,   // guest: has a connection ever succeeded here
   mediaLoaded: false,
   localFile: null,
   mediaUrl: null,
@@ -751,19 +752,32 @@ function completeHandshake(conn) {
   if (hs.readyRes) hs.readyRes(true);
 }
 
-function failHandshake(conn, reason) {
+function failHandshake(conn, reason, timedOut) {
   if (state.conn !== conn) return;
   closeVoice(false);
   const hs = conn._hs;
   if (hs && hs.readyRes) hs.readyRes(false);
-  state.securityFailure = true;
   state.partnerClientId = '';
   state.partnerOnline = false;
   resetCrypto();
-  setStatus('off', 'Security check failed');
+  // A real check failure (bad key, SAS mismatch) is fail-closed: never retry.
+  // A TIMEOUT is not a security verdict — the partner simply never answered,
+  // so the reconnect ladder must keep running instead of freezing the room.
+  if (!timedOut) state.securityFailure = true;
   addSystem('⚠️ ' + reason + ' — connection closed');
   toast(reason);
   try { conn.close(); } catch (e) {}
+  // conn.close() emits 'close' synchronously when the channel was open, and
+  // that handler re-arms the ladder / waiting status. If the close was ever
+  // silent, clean up here so the room still recovers.
+  if (state.conn === conn) {
+    state.connected = false;
+    state.conn = null;
+    state.partnerPeerId = '';
+    updatePartnerUI();
+    if (state.role === 'guest') scheduleGuestReconnect();
+    else setStatus('waiting', 'Waiting for partner…');
+  }
 }
 
 /* =========================================================
@@ -840,21 +854,30 @@ function handlePeerError(err) {
 }
 
 /* Re-register the host peer with the same room id after a signalling drop.
-   The guest's auto-reconnect then finds the room again. */
-async function rearmHost(attempt = 0) {
+   The guest's auto-reconnect then finds the room again. The retry ladder is
+   bounded: while the relay still holds a dying session it answers
+   "unavailable-id", and an unbounded loop here would never give up. */
+let rearmTimer = null;
+let rearmAttempts = 0;
+
+async function rearmHost() {
   const code = state.code;
-  if (!code) return;
+  if (!code || state.role !== 'host' || state.intentionalLeave) return;
+  if (rearmTimer) return;              // a retry is already scheduled
   try {
     await initPeer(PREFIX + code);
   } catch (e) {
-    if (attempt < 2) {
-      setTimeout(() => rearmHost(attempt + 1), 2000);
+    if (rearmAttempts >= 5) {
+      toast('Could not restore the room');
+      leaveRoom();
       return;
     }
-    toast('Could not restore the room');
-    leaveRoom();
+    rearmAttempts++;
+    rearmTimer = setTimeout(() => { rearmTimer = null; rearmHost(); },
+                            2000 * rearmAttempts);
     return;
   }
+  rearmAttempts = 0;
   setStatus('waiting', 'Waiting for partner…');
 }
 
@@ -917,6 +940,7 @@ function wireConn(conn) {
     opened = true;
     conn._openedAt = Date.now();
     state.connected = true;
+    state.everConnected = true;
     state.reconnectAttempts = 0;
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
@@ -937,7 +961,7 @@ function wireConn(conn) {
     conn._pre = [];
     startHandshake(conn);
     conn._hsTimer = setTimeout(() => {
-      if (state.conn === conn && !state.secure) failHandshake(conn, 'Encryption handshake timed out');
+      if (state.conn === conn && !state.secure) failHandshake(conn, 'Encryption handshake timed out', true);
     }, HANDSHAKE_TIMEOUT);
   });
 
@@ -960,8 +984,11 @@ function wireConn(conn) {
     if (state.role === 'guest') {
       if (wasConnected) addSystem('Connection lost — reconnecting…');
       scheduleGuestReconnect();
-    } else {
+    } else if (opened) {
       addSystem((state.partnerName || 'Partner') + ' left the room');
+      setStatus('waiting', 'Waiting for partner…');
+    } else {
+      // a connection that never opened (dead join attempt) — nobody "left"
       setStatus('waiting', 'Waiting for partner…');
     }
   });
@@ -2142,6 +2169,7 @@ function enterRoom(sysText) {
   state.partnerOnline = false;
   state.joinAnnounced = false;
   state.securityFailure = false;
+  state.everConnected = false;
   state.partnerPeerId = '';
   hiddenSince = document.hidden ? Date.now() : 0;
   if (!state.conn) resetCrypto();
@@ -2267,6 +2295,7 @@ function pingPartner() {
 function dropDeadConn() {
   const c = state.conn;
   state.pingWait = null;
+  closeVoice(false);        // a dead channel cannot carry a call
   if (!c) return;
   if (state.conn === c) { state.conn = null; state.partnerPeerId = ''; }
   state.connected = false;
@@ -2313,18 +2342,19 @@ async function onAppVisible() {
     return;
   }
 
-  // Host: re-register the room if the signalling socket went away, otherwise
-  // just wait — the guest reconnects to the same code and replaces the channel.
-  if (!state.peer || state.peer.destroyed) {
-    rearmHost();
-    return;
-  }
-  if (state.peer.disconnected) {
-    try { state.peer.reconnect(); } catch (e) {}
-    setTimeout(() => {
-      if (!state.intentionalLeave && state.code && state.peer && state.peer.disconnected) rearmHost();
-    }, 2500);
-  }
+  // Host: a frozen tab can lose the relay registration while the socket still
+  // looks open — phone doze cuts the network path without a close event, so
+  // the local `peer.disconnected` flag then lies. Nobody is connected here,
+  // so bounce the signalling socket: disconnect() closes it for real, and the
+  // reconnect() re-registers the same room id with the same token, which the
+  // relay treats as a session resume instead of answering "ID is taken".
+  const p = state.peer;
+  if (!p || p.destroyed) { rearmHost(); return; }
+  if (p.disconnected) {
+    try { p.reconnect(); } catch (e) {}     // we knew it dropped — re-register now
+  } else {
+    try { p.disconnect(); } catch (e) {}    // half-open: force a real close;
+  }                                         // the 'disconnected' handler reconnects
 }
 
 /* ---------- auto reconnect ---------- */
@@ -2338,7 +2368,9 @@ function scheduleGuestReconnect() {
   if (document.hidden) { hiddenSince = hiddenSince || Date.now(); return; }
 
   if (state.reconnectAttempts >= MAX_RECONNECT) {
-    toast('Room closed');
+    // never connected: the host was never reached at all — say so plainly
+    toast(state.everConnected ? 'Room closed'
+      : 'Couldn\u2019t reach the room — ask the host to open the app');
     state.intentionalLeave = true;
     setTimeout(() => { leaveRoom(); }, 700);
     return;
@@ -2346,7 +2378,8 @@ function scheduleGuestReconnect() {
 
   const delay = Math.min(1200 * Math.pow(1.5, state.reconnectAttempts), 8000);
   state.reconnectAttempts++;
-  setStatus('off', 'Reconnecting… (' + state.reconnectAttempts + ')');
+  setStatus('off', (state.everConnected
+    ? 'Reconnecting… (' : 'Looking for the host… (') + state.reconnectAttempts + ')');
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
     doGuestConnect();

@@ -203,6 +203,8 @@ A phone freezes a hidden tab: timers stop, the signalling socket can drop, and t
 - The host replaces a stale connection instead of answering *room is full*: a returning partner is recognised by a **stable per-room client id**, or by a peer connection that has actually failed, and takes the guest seat back.
 - If the other side rebuilt its transport, an incoming `key` frame on an already verified channel restarts the handshake on both ends (throttled so a replay cannot force an endless key reset).
 - The retry budget is 40 attempts (about 5 minutes) and it restarts every time you come back. A **failed security check never auto-retries** — that would be the fail-closed case.
+- Coming back, the **host** does not trust the signalling socket: a frozen tab can lose the room's registration with the relay while the socket still *looks* alive, so with nobody connected the host re-registers the room instead. A joiner who entered the code while the host was away connects the moment the host reopens the app — both people no longer need to be in the app at the same time.
+- A joiner who enters a code before the host is back sees **Looking for the host…** and keeps retrying for about 5 minutes; a join attempt that never opens is dropped after 9 s and retried, and if the host never returns the message says so plainly instead of pretending the room closed. A security handshake that gets **no answer** also times out and rejoins the same retry queue — only a real security failure (the codes don't match) stays closed.
 
 What survives a reconnect:
 
