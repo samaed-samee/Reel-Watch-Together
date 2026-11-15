@@ -3575,6 +3575,7 @@ function applyFakeLandscape() {
 function removeFakeLandscape() {
   videoWrap.classList.remove('fake-landscape');
   document.body.classList.remove('fs-landscape');
+  emojiStrip.classList.remove('show');   // the picker is fullscreen-only
   updateAutoFrame();
   placeSheetForFullscreen();
 }

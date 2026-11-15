@@ -453,7 +453,17 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .ctrl-btn.ghosty{background:transparent;border-color:transparent}
 .ctrl-btn.sm{width:28px;height:28px}
 .ctrl-btn.sm svg{width:14px;height:14px}
-#btn-player-emoji{font-size:15.5px;line-height:1}
+#btn-player-emoji{font-size:15.5px;line-height:1;display:none}
+
+/* Emoji reactions are a fullscreen activity: in the normal view the chat
+   composer already has the picker, so the button only exists while the
+   player is fullscreen (real or fake-landscape on iOS). One selector per
+   rule, like every other fullscreen rule in this file — a browser that
+   doesn't know :-webkit-full-screen (e.g. Firefox) drops a comma list
+   entirely, and then the button would never show in fullscreen. */
+.video-wrap:fullscreen #btn-player-emoji{display:grid}
+.video-wrap:-webkit-full-screen #btn-player-emoji{display:grid}
+.video-wrap.fake-landscape #btn-player-emoji{display:grid}
 
 /* emoji reactions strip — lives inside the player controls so it renders in
    fullscreen too (the fullscreened .video-wrap is all the browser shows) */

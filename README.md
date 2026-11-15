@@ -37,7 +37,7 @@ Everything that travels between the two devices — chat, reactions, playback co
 | 📁 **Send local files** | Pick one movie — or **several at once**: the first plays now, the rest queue and auto-play in turn, each one streamed to your partner over WebRTC. |
 | 💬 **Chat** | Typing indicators, replies, delivery/read ticks, emoji bursts and swipe-to-reply. Messages sent near a disconnect are retried automatically, and replays are de-duplicated. |
 | 🎙️ **Live voice** | Encrypted peer-to-peer voice with one-tap mute, speaking glow and a live waveform. Audio stays muted until the call's DTLS fingerprint is verified. |
-| 😍 **Reactions** | Double-tap a message. One reaction per person, tap again to remove it. Emoji bursts also work **inside the video player**: a 😊 button sits next to the change-video button, so you can burst emojis while watching fullscreen — the picker lives inside the player, and the floating emojis follow the fullscreen surface. |
+| 😍 **Reactions** | Double-tap a message. One reaction per person, tap again to remove it. Emoji bursts also work **inside the video player while it is fullscreen**: only then a 😊 button appears next to the change-video button — the picker lives inside the player, and the floating emojis follow the fullscreen surface. |
 | 🔐 **End-to-end encryption** | Authenticated ECDH + HKDF + AES-GCM-256, plus a 6-digit safety code to detect a man-in-the-middle. |
 | 👥 **Rooms of exactly two** | The host accepts one guest; anyone else is turned away. A returning partner replaces their own stale socket. |
 | 📱 **Mobile-first** | Safe-area aware, keyboard-aware composer, fullscreen with landscape lock. Room options also has a browser-only **Fullscreen** toggle that hides the browser toolbar. |
