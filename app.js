@@ -2224,6 +2224,7 @@ function leaveRoom() {
   try { video.load(); } catch (e) {}
   hideTransfer();
   closeSheet();
+  emojiStrip.classList.remove('show');   // the picker dies with the room
   sampleVideoBars(true);
   clearReply();
   showHome();
@@ -3847,7 +3848,12 @@ let idleTimer;
 function showControls(autoHide = true) {
   videoWrap.classList.remove('idle');
   clearTimeout(idleTimer);
-  if (autoHide) idleTimer = setTimeout(() => videoWrap.classList.add('idle'), 3000);
+  if (autoHide) idleTimer = setTimeout(() => {
+    // while the emoji strip is open the user is choosing, not idle —
+    // keep the controls up until it is closed
+    if (emojiStrip.classList.contains('show')) { showControls(); return; }
+    videoWrap.classList.add('idle');
+  }, 3000);
 }
 function hideControls() {
   clearTimeout(idleTimer);
@@ -4271,9 +4277,42 @@ $('#btn-emoji').addEventListener('click', () => {
   emojiPanel.classList.toggle('show');
   haptic(6);
 });
+
+/* ----- player emoji strip (renders in fullscreen too) ----- */
+const emojiStrip = $('#emoji-strip');
+
+function buildEmojiStrip() {
+  emojiStrip.innerHTML = '';
+  EMOJIS.forEach(e => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = e;
+    b.addEventListener('click', () => {
+      if (!takeToken(txAnim)) return;
+      haptic(5);
+      showControls();      // keep the player controls up while reacting
+      // same as the chat panel: a burst floats up on BOTH screens
+      spawnFloatingEmoji(e, { count: 7 });
+      send({ t: 'float', e });
+    });
+    emojiStrip.appendChild(b);
+  });
+}
+buildEmojiStrip();
+
+$('#btn-player-emoji').addEventListener('click', e => {
+  e.stopPropagation();     // must not reach the video tap/hold logic
+  haptic(6);
+  showControls();
+  emojiStrip.classList.toggle('show');
+});
+
 document.addEventListener('pointerdown', e => {
   if (!emojiPanel.contains(e.target) && e.target.id !== 'btn-emoji') {
     emojiPanel.classList.remove('show');
+  }
+  if (!emojiStrip.contains(e.target) && e.target.id !== 'btn-player-emoji') {
+    emojiStrip.classList.remove('show');
   }
 }, true);
 
@@ -4311,6 +4350,13 @@ function placeSheetForFullscreen() {
     if (dlgBackdrop) host.appendChild(dlgBackdrop);
     if (toastEl) host.appendChild(toastEl);
   }
+  // the floating-emoji layer too: fixed-positioned on <body> it would be
+  // invisible while the fullscreened .video-wrap is all the browser renders.
+  // body stays its home otherwise — .fake-landscape rotates videoWrap, and
+  // the burst then rises in the rotated video's own up direction.
+  const inFs = fsEl === videoWrap || isFakeLandscape();
+  if (inFs && floatLayer.parentElement !== videoWrap) videoWrap.appendChild(floatLayer);
+  else if (!inFs && floatLayer.parentElement !== document.body) document.body.appendChild(floatLayer);
 }
 sheetBackdrop.addEventListener('click', closeSheet);
 

@@ -453,6 +453,24 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 .ctrl-btn.ghosty{background:transparent;border-color:transparent}
 .ctrl-btn.sm{width:28px;height:28px}
 .ctrl-btn.sm svg{width:14px;height:14px}
+#btn-player-emoji{font-size:15.5px;line-height:1}
+
+/* emoji reactions strip — lives inside the player controls so it renders in
+   fullscreen too (the fullscreened .video-wrap is all the browser shows) */
+.emoji-strip{
+  display:none;align-items:center;gap:2px;overflow-x:auto;
+  margin:0 0 8px;padding:5px 8px;flex:0 0 auto;
+  background:rgba(27,24,21,.78);backdrop-filter:blur(6px);
+  border:1.5px solid rgba(255,255,255,.22);border-radius:14px;
+  scrollbar-width:none;
+}
+.emoji-strip::-webkit-scrollbar{display:none}
+.emoji-strip.show{display:flex}
+.emoji-strip button{
+  font-size:21px;background:transparent;border:none;padding:2px 4px;cursor:pointer;
+  flex:0 0 auto;border-radius:8px;transition:transform .1s, background .15s;
+}
+.emoji-strip button:active{transform:scale(1.35);background:rgba(240,81,75,.25)}
 .time{font-size:10.5px;color:rgba(255,255,255,.85);font-variant-numeric:tabular-nums;font-weight:600;flex:0 0 auto;min-width:32px;text-align:center}
 
 .scrub{position:relative;flex:1 1 auto;height:22px;display:flex;align-items:center;touch-action:none;cursor:pointer}
