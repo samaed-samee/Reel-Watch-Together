@@ -19,7 +19,7 @@
   --spring: cubic-bezier(.34,1.56,.64,1);
 }
 *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{height:100%;margin:0;padding:0;background:var(--paper);overflow:hidden}
+html,body{height:100%;margin:0;padding:0;background:var(--paper);overflow:hidden;overscroll-behavior:none}
 body{
   font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   background:var(--paper);
@@ -121,8 +121,10 @@ body.fs-landscape .view:not(.hidden){will-change:auto}
 /* ============ HOME ============ */
 #view-home{
   padding:calc(var(--safe-t) + 8px) 20px calc(var(--safe-b) + 8px);
-  overflow:hidden;
+  overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
 }
+#view-home::-webkit-scrollbar{display:none}
 .home-top{display:flex;align-items:center;justify-content:space-between;padding-top:0}
 .brand{display:flex;align-items:center;gap:10px}
 .brand-mark{
@@ -312,8 +314,9 @@ body.kb-open .composer{
   padding-bottom:10px;z-index:60;
   background:var(--paper);
 }
-/* home: only scrollable while the keyboard is up, so the inputs stay reachable */
-body.kb-open #view-home{overflow-y:auto;padding-bottom:calc(var(--kb) + 12px)}
+/* home: scrolls on its own, so a keyboard that resizes the layout (or one
+   that overlays it) can always reach the inputs */
+body.kb-open #view-home{padding-bottom:calc(var(--kb) + 12px)}
 /* the view re-anchors under the visible band while the keyboard is up —
    pin the brand row so the header never leaves the screen when a field
    scrolls into view */
@@ -326,7 +329,7 @@ body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
 /* sheets float above the keyboard exactly like the composer — they are
    viewport-fixed, so the float is the keyboard strip measured from the
    layout bottom (shrink + pan) */
-body.kb-open .sheet{bottom:var(--kb)}
+body.kb-open .sheet{bottom:var(--kb);max-height:min(90%, calc(100% - var(--kb) - 12px))}
 .video-wrap{
   position:relative;width:100%;aspect-ratio:16/9;background:#141210;
   border:2.5px solid var(--ink);
@@ -716,7 +719,7 @@ body.kb-open .sheet{bottom:var(--kb)}
   border-radius:18px 6px 18px 6px/6px 18px 6px 18px;
   box-shadow:4px 4px 0 var(--ink);
   padding:10px;display:grid;grid-template-columns:repeat(5,1fr);gap:2px;
-  max-height:180px;overflow-y:auto;z-index:40;
+  max-height:180px;overflow-y:auto;overscroll-behavior:contain;z-index:40;
   opacity:0;transform:translateY(12px) scale(.96);pointer-events:none;
   transition:all .26s var(--ease);transform-origin:bottom left;
 }
@@ -753,7 +756,7 @@ body.kb-open .sheet{bottom:var(--kb)}
 .sheet-menu{display:flex;flex-direction:column;gap:10px}
 
 /* --- playlist sheet --- */
-.pl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:46vh;overflow-y:auto}
+.pl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:46vh;overflow-y:auto;overscroll-behavior:contain}
 .pl-row{
   display:flex;align-items:center;gap:10px;
   background:var(--card);border:2px solid var(--paper-2);border-radius:12px 4px 12px 4px/4px 12px 4px 12px;
@@ -803,7 +806,7 @@ body.kb-open .sheet{bottom:var(--kb)}
 
 /* --- link finder results --- */
 .crawl-status{font-size:13px;color:var(--ink-2);margin:2px 0 10px;font-weight:500}
-.crawl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:40vh;overflow-y:auto}
+.crawl-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;max-height:40vh;overflow-y:auto;overscroll-behavior:contain}
 .crawl-item{
   display:flex;align-items:center;gap:8px;
   background:var(--card);border:2px solid var(--paper-2);border-radius:12px 4px 12px 4px/4px 12px 4px 12px;
@@ -851,7 +854,7 @@ body.kb-open .sheet{bottom:var(--kb)}
 
 /* --- toast --- */
 #toast{
-  position:fixed;left:50%;bottom:calc(var(--safe-b) + 96px);transform:translate(-50%,20px);
+  position:fixed;left:50%;bottom:calc(var(--safe-b) + 96px + var(--kb));transform:translate(-50%,20px);
   background:var(--ink);color:var(--paper);font-size:13px;font-weight:600;
   padding:11px 20px;border-radius:14px 5px 14px 5px/5px 14px 5px 14px;
   border:2px solid var(--ink);z-index:9500;opacity:0;pointer-events:none;

@@ -3583,24 +3583,64 @@ function removeFakeLandscape() {
   placeSheetForFullscreen();
 }
 
+/* The keyboard and any open sheet must be gone before the screen is handed to
+   the player: requestFullscreen() while an input is focused leaves the IME on
+   top of the video, and an open sheet would be stranded outside the new
+   viewport. */
+function blurForFullscreen() {
+  const el = document.activeElement;
+  if (el && el !== document.body && typeof el.blur === 'function') el.blur();
+  // blur() dispatches focusout synchronously and schedules a keyboard re-read;
+  // a re-read while the IME is still closing would float the composer again
+  // in the middle of the fullscreen transition.
+  clearTimeout(vvTimer);
+  clearTimeout(kbFollow);
+  pendingGeom = null;          // forget the last reading: the screen is changing
+  unstableSince = 0;
+  closeSheet();
+  emojiStrip.classList.remove('show');
+  kbState = false;
+  lastKbPx = 0;
+  lastTopPx = 0;
+  document.body.classList.remove('kb-open');
+  document.documentElement.style.setProperty('--kb', '0px');
+  document.documentElement.style.setProperty('--vv-top', '0px');
+}
+
+/* Orientation lock is best-effort and can hang in some WebViews. */
+function lockLandscape() {
+  const so = screen.orientation;
+  if (!so || typeof so.lock !== 'function') return Promise.resolve(false);
+  return Promise.race([
+    so.lock('landscape').then(() => true).catch(() => false),
+    new Promise(r => setTimeout(() => r(false), 900))
+  ]);
+}
+
 async function enterFullscreen() {
   const el = videoWrap;
+  blurForFullscreen();
+
   try {
     if (el.requestFullscreen) await el.requestFullscreen();
     else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
   } catch (e) {}
+  await new Promise(r => setTimeout(r, 40));
 
-  let locked = false;
-  try {
-    if (screen.orientation && screen.orientation.lock) {
-      await screen.orientation.lock('landscape');
-      locked = true;
+  if (appFullscreenEl() === el) {
+    // Real fullscreen already owns the screen. Rotating the stage on top of it
+    // double-rotated the video in v30 — never apply the fake rotation here.
+    await lockLandscape();
+  } else {
+    // No native fullscreen (iOS Safari, a denied request, or a WebView that
+    // only supports <video> fullscreen) → rotate the stage ourselves.
+    const locked = await lockLandscape();
+    if (!locked && !isFakeLandscape() && window.innerHeight > window.innerWidth) {
+      applyFakeLandscape();
     }
-  } catch (e) {}
-
-  // Orientation lock not available (iOS Safari etc.) → rotate the stage ourselves
-  if (!locked && window.innerHeight > window.innerWidth) applyFakeLandscape();
+  }
   showControls(false);
+  queueViewport(80);
 }
 function exitFullscreen() {
   removeFakeLandscape();
@@ -3636,7 +3676,7 @@ function onFullscreenChange() {
     placeSheetForFullscreen();
   }
   showControls();
-  setTimeout(syncViewport, 250);
+  queueViewport(120);
 }
 document.addEventListener('fullscreenchange', onFullscreenChange);
 document.addEventListener('webkitfullscreenchange', onFullscreenChange);
@@ -4542,6 +4582,7 @@ async function toggleAppFullscreen() {
       else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
       toast('Fullscreen off');
     } else {
+      blurForFullscreen();
       if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' });
       else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
       else { toast('Fullscreen is not available in this browser'); return; }
@@ -4855,7 +4896,6 @@ document.addEventListener('touchend', e => {
 // keep layout stable on resize / keyboard
 window.addEventListener('resize', () => {
   syncViewport();
-  scrollChat(true);
   // device rotated to real landscape → drop the simulated rotation
   if (isFakeLandscape() && window.innerWidth > window.innerHeight) removeFakeLandscape();
 });
@@ -4875,8 +4915,21 @@ window.addEventListener('resize', () => {
    Both are one geometry: the visible band is [offsetTop, offsetTop+height],
    so the hidden strip is innerHeight - offsetTop - height. The composer
    floats by exactly that strip — whether the browser shrank the band,
-   panned it, or both. The pan is also published as --vv-top and the app
-   re-anchors to the visible band, so the header/video stay reachable. */
+   panned it, or both. Pan-only keyboards also re-anchor the app to the band
+   so the header/video stay reachable.
+
+   v31: the IME fires resize/scroll dozens of times while it animates, and
+   moving .app (plus scrolling the chat) on every event read as flicker. The
+   state is now sticky — opening needs a keyboard-sized change, closing needs
+   the band clearly back — and the geometry is only read once the burst
+   settles. A layout-resize keyboard (adjustResize WebView) needs none of
+   this: the app is already the right size, so kb-open stays off.
+
+   v32: Chromium often reports the keyboard in TWO phases — a visual-viewport
+   shrink first, then the layout resize. Committing phase one floats the
+   composer and phase two yanks it back to the original place: the flicker
+   seen in the APK. A reading is therefore only committed when two reads
+   agree, and a keyboard can only OPEN while a field is focused. */
 const vv = window.visualViewport;
 
 /* isolated so the maths can be checked without a real keyboard */
@@ -4889,37 +4942,104 @@ function readViewport() {
   };
 }
 
-function syncViewport() {
-  if (!vv) return;
-  const { innerH, vvH, vvTop } = readViewport();
+let kbState = false;
+let lastKbPx = -1;
+let lastTopPx = -1;
+let revealFrame = 0;
+let revealPending = { top: 0, band: 0 };
+
+function setViewportVar(name, value, last) {
+  if (value === last) return last;
+  document.documentElement.style.setProperty(name, value + 'px');
+  return value;
+}
+
+function isEditable(el) {
+  if (!el || el === document.body) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+}
+
+function geomKey(g) {
+  return g.innerH + '|' + Math.round(g.vvH) + '|' + Math.round(g.vvTop);
+}
+
+/* commits a settled keyboard reading to the DOM */
+function applyViewport(g) {
+  const { innerH, vvH, vvTop } = g;
   // the strip hidden below the visible band when the browser both shrinks
   // and pans. NEVER add the pan on top of the shrink: panning reveals
   // content, it does not add coverage (double-counting floats the composer
   // up to the header)
   const covered = Math.max(0, innerH - vvH - vvTop);
-  // pan-only keyboards (resizes-visual: Chrome, PWA) leave `covered` at ~0
-  // while sliding the whole band down to reach a bottom field — the pan
-  // itself is the keyboard signal there, so the header re-anchor must too
-  const kbOpen = covered > 120 || vvTop > 2;
+  // a keyboard only exists under a focused field. Without focus there is
+  // nothing to type into, so late IME-close events can never re-open the
+  // float behind a fullscreen transition.
+  const editing = isEditable(document.activeElement);
 
-  document.body.classList.toggle('kb-open', kbOpen);
+  // sticky state: 2px of browser jitter must never toggle the layout. A real
+  // keyboard covers >120px or pans >48px; it is gone only once both are back
+  if (kbState) kbState = covered > 40 || vvTop > 16;
+  else kbState = editing && (covered > 120 || vvTop > 48);
+
+  if (document.body.classList.contains('kb-open') !== kbState) {
+    document.body.classList.toggle('kb-open', kbState);
+  }
+
   // float amount for overlays pinned to the app bottom (composer, sheets):
   // .app is inset:0 with top:--vv-top, so its bottom stays on the layout
   // bottom — the strip behind the keyboard is innerH - vvH - vvTop. Never
   // add the pan on top of the shrink (double-count) — this is v29's value.
-  document.documentElement.style.setProperty(
-    '--kb', kbOpen ? Math.round(covered) + 'px' : '0px'
-  );
-  // re-anchor the app to the visible band — this is what brings the header
-  // back on pan-only keyboards; normal scrolling must not move the app
-  document.documentElement.style.setProperty(
-    '--vv-top', kbOpen && vvTop > 0 ? Math.round(vvTop) + 'px' : '0px'
-  );
+  lastKbPx = setViewportVar('--kb', kbState ? Math.round(covered) : 0, lastKbPx);
+  // re-anchor the app to the visible band. Only pan-only keyboards need it;
+  // below 24px it is browser chrome noise, not a keyboard.
+  lastTopPx = setViewportVar('--vv-top', kbState && vvTop > 24 ? Math.round(vvTop) : 0, lastTopPx);
 
-  if (kbOpen) {
-    scrollChat(true);
-    revealFocused(vvTop, vvH);
+  if (kbState) {
+    revealPending = { top: vvTop, band: vvH };
+    if (!revealFrame) {
+      revealFrame = requestAnimationFrame(() => {
+        revealFrame = 0;
+        revealFocused(revealPending.top, revealPending.band);
+      });
+    }
   }
+}
+
+/* Chromium often reports the keyboard in TWO phases: a visual-viewport
+   shrink first, then the layout resize. Committing the first phase's
+   geometry floats the composer up and the second phase pulls it right back
+   — the input flicker seen in the APK. So a reading is only committed once
+   two reads spaced ≥90ms agree; until then the current layout is left
+   untouched. If the geometry keeps oscillating (pinch zoom, flaky viewport
+   reports) the latest reading is applied after ~1.2s so the state can never
+   get stuck. */
+let pendingGeom = null;
+let pendingAt = 0;
+let unstableSince = 0;
+
+function syncViewport() {
+  if (!vv) return;
+  const g = readViewport();
+  const now = performance.now();
+  const stable = pendingGeom !== null &&
+    geomKey(pendingGeom) === geomKey(g) &&
+    (now - pendingAt) >= 90;
+
+  if (!stable && unstableSince && now - unstableSince > 1200) {
+    pendingGeom = g; pendingAt = now;
+    applyViewport(g);
+    return;
+  }
+  pendingGeom = g;
+  pendingAt = now;
+  if (!stable) {
+    if (!unstableSince) unstableSince = now;
+    queueViewport(120);            // re-read; commits only when it agrees
+    return;
+  }
+  unstableSince = 0;
+  applyViewport(g);
 }
 
 /* panning reveals a bottom field by sliding the band down; re-anchoring then
@@ -4941,18 +5061,36 @@ function revealFocused(vvTop, bandH) {
   if (shift) view.scrollTop += shift;
 }
 
-/* coalesce the burst of events fired while the keyboard slides in/out */
-let vvFrame = 0;
-function queueViewport() {
-  if (vvFrame) return;
-  vvFrame = requestAnimationFrame(() => { vvFrame = 0; syncViewport(); });
+/* One shared debounce for every viewport source (resize, scroll, focus
+   follow-ups). Different delays used to produce two reads at two different
+   moments of the IME animation; a single timer means one settled reading. */
+let vvTimer = 0;
+function queueViewport(delay = 160) {
+  clearTimeout(vvTimer);
+  vvTimer = setTimeout(() => { vvTimer = 0; syncViewport(); }, delay);
 }
 
 if (vv) {
-  vv.addEventListener('resize', queueViewport);
-  vv.addEventListener('scroll', queueViewport);
+  vv.addEventListener('resize', () => queueViewport(240));
+  vv.addEventListener('scroll', () => queueViewport(240));
 }
-window.addEventListener('orientationchange', () => setTimeout(syncViewport, 300));
+
+/* Focus is the only reliable "keyboard is coming" signal on pan-only WebViews
+   (they never resize the layout). The second pass catches browsers that
+   report the keyboard late. */
+let kbFollow = 0;
+function followKeyboard() {
+  queueViewport(200);
+  clearTimeout(kbFollow);
+  kbFollow = setTimeout(syncViewport, 500);
+}
+document.addEventListener('focusin', e => { if (isEditable(e.target)) followKeyboard(); });
+document.addEventListener('focusout', followKeyboard);
+
+window.addEventListener('orientationchange', () => {
+  kbState = false;
+  setTimeout(syncViewport, 320);
+});
 
 // warn before leaving mid-room
 window.addEventListener('beforeunload', e => {
