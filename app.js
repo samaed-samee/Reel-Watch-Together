@@ -4862,14 +4862,21 @@ window.addEventListener('resize', () => {
 
 /* ---------- mobile keyboard handling ----------
    The app keeps its full size when the keyboard opens — nothing shrinks
-   or jumps. We measure how much the keyboard covers and float the composer
-   right above it (see body.kb-open rules in the CSS).
+   or jumps. We measure how much of the app the keyboard covers and float
+   the composer right above it (see body.kb-open rules in the CSS).
 
-   Mobile browsers also *pan* the visual viewport to reveal the focused
-   field (visualViewport.offsetTop). The whole app is position:fixed in the
-   layout viewport, so that pan used to drag the header and the video off
-   the top of the screen. The pan is now published as --vv-top and the app
-   re-anchors to the visible band, so only the composer moves. */
+   Browsers hide the bottom of the app in two ways (sometimes both):
+   • visual shrink (resizes-visual / Chrome PWA): the visible band gets
+     shorter while the layout viewport stays full-size
+   • panning: the band slides down to reveal the focused field — offsetTop
+     grows while the height may stay (Android WebViews without a
+     windowSoftInputMode pan this way)
+
+   Both are one geometry: the visible band is [offsetTop, offsetTop+height],
+   so the hidden strip is innerHeight - offsetTop - height. The composer
+   floats by exactly that strip — whether the browser shrank the band,
+   panned it, or both. The pan is also published as --vv-top and the app
+   re-anchors to the visible band, so the header/video stay reachable. */
 const vv = window.visualViewport;
 
 /* isolated so the maths can be checked without a real keyboard */
@@ -4885,6 +4892,10 @@ function readViewport() {
 function syncViewport() {
   if (!vv) return;
   const { innerH, vvH, vvTop } = readViewport();
+  // the strip of the app hidden below the visible band — exactly the
+  // keyboard's coverage. NEVER add the pan on top of the shrink: panning
+  // reveals content, it does not add coverage (double-counting floats the
+  // composer up to the header)
   const covered = Math.max(0, innerH - vvH - vvTop);
   const kbOpen = covered > 120;
 
