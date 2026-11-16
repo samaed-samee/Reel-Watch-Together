@@ -4892,21 +4892,53 @@ function readViewport() {
 function syncViewport() {
   if (!vv) return;
   const { innerH, vvH, vvTop } = readViewport();
-  // the strip of the app hidden below the visible band — exactly the
-  // keyboard's coverage. NEVER add the pan on top of the shrink: panning
-  // reveals content, it does not add coverage (double-counting floats the
-  // composer up to the header)
+  // the strip hidden below the visible band when the browser both shrinks
+  // and pans. NEVER add the pan on top of the shrink: panning reveals
+  // content, it does not add coverage (double-counting floats the composer
+  // up to the header)
   const covered = Math.max(0, innerH - vvH - vvTop);
-  const kbOpen = covered > 120;
+  // pan-only keyboards (resizes-visual: Chrome, PWA) leave `covered` at ~0
+  // while sliding the whole band down to reach a bottom field — the pan
+  // itself is the keyboard signal there, so the header re-anchor must too
+  const kbOpen = covered > 120 || vvTop > 2;
 
   document.body.classList.toggle('kb-open', kbOpen);
-  document.documentElement.style.setProperty('--kb', kbOpen ? Math.round(covered) + 'px' : '0px');
-  // follow the pan only while the keyboard is up — normal scrolling must not move the app
+  // float amount for overlays pinned to the app bottom (composer, sheets):
+  // .app is inset:0 with top:--vv-top, so its bottom stays on the layout
+  // bottom — the strip behind the keyboard is innerH - vvH - vvTop. Never
+  // add the pan on top of the shrink (double-count) — this is v29's value.
+  document.documentElement.style.setProperty(
+    '--kb', kbOpen ? Math.round(covered) + 'px' : '0px'
+  );
+  // re-anchor the app to the visible band — this is what brings the header
+  // back on pan-only keyboards; normal scrolling must not move the app
   document.documentElement.style.setProperty(
     '--vv-top', kbOpen && vvTop > 0 ? Math.round(vvTop) + 'px' : '0px'
   );
 
-  if (kbOpen) scrollChat(true);
+  if (kbOpen) {
+    scrollChat(true);
+    revealFocused(vvTop, vvH);
+  }
+}
+
+/* panning reveals a bottom field by sliding the band down; re-anchoring then
+   slides the app back under the band, which would hide an in-flow field
+   again — scroll its view so the field stays inside the band. Fixed overlays
+   (composer, sheet) float by --kb instead. */
+function revealFocused(vvTop, bandH) {
+  const el = document.activeElement;
+  if (!el || el === document.body) return;
+  if (el.closest && (el.closest('.composer') || el.closest('.sheet'))) return;
+  const view = el.closest('.view');
+  if (!view) return;
+  const r = el.getBoundingClientRect();
+  const top = r.top - vvTop;     // app coordinates: the band spans [0..bandH]
+  const bottom = r.bottom - vvTop;
+  let shift = 0;
+  if (bottom > bandH - 12) shift = bottom - (bandH - 12);
+  else if (top < 12) shift = top - 12;
+  if (shift) view.scrollTop += shift;
 }
 
 /* coalesce the burst of events fired while the keyboard slides in/out */

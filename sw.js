@@ -6,12 +6,12 @@
    Bump VERSION whenever you ship changed app files, or the old
    shell keeps coming back from the cache.
    ========================================================= */
-const VERSION = 'reel-shell-v29';
+const VERSION = 'reel-shell-v30';
 const SHELL = [
   './',
   './index.html',
-  './styles.css?v=29',
-  './app.js?v=29',
+  './styles.css?v=30',
+  './app.js?v=30',
   './boot.js',
   './manifest.json',
   './vendor/peer.min.js',

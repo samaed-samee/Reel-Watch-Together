@@ -314,8 +314,19 @@ body.kb-open .composer{
 }
 /* home: only scrollable while the keyboard is up, so the inputs stay reachable */
 body.kb-open #view-home{overflow-y:auto;padding-bottom:calc(var(--kb) + 12px)}
+/* the view re-anchors under the visible band while the keyboard is up —
+   pin the brand row so the header never leaves the screen when a field
+   scrolls into view */
+body.kb-open #view-home .home-top{
+  position:sticky;top:calc(var(--safe-t) + 2px);z-index:6;
+  background:var(--paper);margin:0 -20px;padding:2px 20px 4px;
+}
 body.kb-open .chat-wrap{padding-bottom:calc(var(--kb) + 68px)}
 body.kb-open .emoji-panel{bottom:calc(var(--kb) + 74px)}
+/* sheets float above the keyboard exactly like the composer — they are
+   viewport-fixed, so the float is the keyboard strip measured from the
+   layout bottom (shrink + pan) */
+body.kb-open .sheet{bottom:var(--kb)}
 .video-wrap{
   position:relative;width:100%;aspect-ratio:16/9;background:#141210;
   border:2.5px solid var(--ink);
