@@ -4954,6 +4954,30 @@ function setViewportVar(name, value, last) {
   return value;
 }
 
+/* The re-anchor that keeps the header on screen must be IMMEDIATE. The browser
+   pans the visual viewport the instant the IME opens; waiting for the debounced
+   "settled" reading below (≈1s) lets the header slide off the top first and
+   then snap back. So --vv-top has its own fast path, driven straight from
+   visualViewport events, and is the only owner of that variable. */
+const VV_ANCHOR_MIN = 4;
+function setVvTop(value) {
+  if (value === lastTopPx) return;
+  lastTopPx = value;
+  document.documentElement.style.setProperty('--vv-top', value + 'px');
+}
+let vvTopFrame = 0;
+function pinToVisibleBand() {
+  if (!vv || vvTopFrame) return;
+  vvTopFrame = requestAnimationFrame(() => {
+    vvTopFrame = 0;
+    // Only trust a pan while a field is focused. Otherwise offsetTop is
+    // browser-chrome noise and must never drag the header down.
+    const editing = isEditable(document.activeElement);
+    const top = vv.offsetTop;
+    setVvTop(editing && top > VV_ANCHOR_MIN ? Math.round(top) : 0);
+  });
+}
+
 function isEditable(el) {
   if (!el || el === document.body) return false;
   const tag = (el.tagName || '').toLowerCase();
@@ -4987,13 +5011,14 @@ function applyViewport(g) {
   }
 
   // float amount for overlays pinned to the app bottom (composer, sheets):
-  // .app is inset:0 with top:--vv-top, so its bottom stays on the layout
+  // .app stays inset:0 in the layout viewport, so its bottom is the layout
   // bottom — the strip behind the keyboard is innerH - vvH - vvTop. Never
   // add the pan on top of the shrink (double-count) — this is v29's value.
   lastKbPx = setViewportVar('--kb', kbState ? Math.round(covered) : 0, lastKbPx);
-  // re-anchor the app to the visible band. Only pan-only keyboards need it;
-  // below 24px it is browser chrome noise, not a keyboard.
-  lastTopPx = setViewportVar('--vv-top', kbState && vvTop > 24 ? Math.round(vvTop) : 0, lastTopPx);
+  // Header-only band offset. The fast path above already set this on the first
+  // vv event; mirror the settled value here so a keyboard that opens without a
+  // vv scroll event is still covered, and a closed keyboard releases it.
+  setVvTop(kbState && vvTop > VV_ANCHOR_MIN ? Math.round(vvTop) : 0);
 
   if (kbState) {
     revealPending = { top: vvTop, band: vvH };
@@ -5042,9 +5067,10 @@ function syncViewport() {
   applyViewport(g);
 }
 
-/* panning reveals a bottom field by sliding the band down; re-anchoring then
-   slides the app back under the band, which would hide an in-flow field
-   again — scroll its view so the field stays inside the band. Fixed overlays
+/* The app stays full-size at the layout top; only the header follows the band.
+   getBoundingClientRect() is already in visual-viewport coordinates, where the
+   band spans [0..bandH] — do NOT subtract offsetTop here (that was for the old
+   app re-anchor and pushed in-flow fields further out of view). Fixed overlays
    (composer, sheet) float by --kb instead. */
 function revealFocused(vvTop, bandH) {
   const el = document.activeElement;
@@ -5053,8 +5079,8 @@ function revealFocused(vvTop, bandH) {
   const view = el.closest('.view');
   if (!view) return;
   const r = el.getBoundingClientRect();
-  const top = r.top - vvTop;     // app coordinates: the band spans [0..bandH]
-  const bottom = r.bottom - vvTop;
+  const top = r.top;
+  const bottom = r.bottom;
   let shift = 0;
   if (bottom > bandH - 12) shift = bottom - (bandH - 12);
   else if (top < 12) shift = top - 12;
@@ -5071,8 +5097,10 @@ function queueViewport(delay = 160) {
 }
 
 if (vv) {
-  vv.addEventListener('resize', () => queueViewport(240));
-  vv.addEventListener('scroll', () => queueViewport(240));
+  // rAF-throttled fast path: pin the header on the very first frame the IME
+  // pans, while the debounced reading below still decides the composer float.
+  vv.addEventListener('resize', () => { pinToVisibleBand(); queueViewport(240); });
+  vv.addEventListener('scroll', () => { pinToVisibleBand(); queueViewport(240); });
 }
 
 /* Focus is the only reliable "keyboard is coming" signal on pan-only WebViews
@@ -5084,8 +5112,17 @@ function followKeyboard() {
   clearTimeout(kbFollow);
   kbFollow = setTimeout(syncViewport, 500);
 }
-document.addEventListener('focusin', e => { if (isEditable(e.target)) followKeyboard(); });
-document.addEventListener('focusout', followKeyboard);
+document.addEventListener('focusin', e => {
+  if (isEditable(e.target)) { pinToVisibleBand(); followKeyboard(); }
+});
+document.addEventListener('focusout', () => {
+  followKeyboard();
+  // Release the re-anchor as soon as the keyboard closes, but check on the
+  // next frame so moving focus between two fields does not drop it for a beat.
+  requestAnimationFrame(() => {
+    if (!isEditable(document.activeElement)) setVvTop(0);
+  });
+});
 
 window.addEventListener('orientationchange', () => {
   kbState = false;
